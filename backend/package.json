@@ -1,0 +1,28 @@
+{
+  "type": "module",
+  "dependencies": {
+    "axios": "^1.20.0",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "crypto-js": "^4.2.0",
+    "csv-parse": "^7.0.3",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "mongodb": "^6.0.0",
+    "mongoose": "^9.9.2",
+    "multer": "^2.4.0",
+    "ngrok": "^5.0.0-beta.2",
+    "nodemailer": "^9.0.6",
+    "upstox-js-sdk": "^2.31.0",
+    "ws": "^8.22.0",
+    "xlsx": "^0.18.5"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
