@@ -19,13 +19,13 @@ export default function TopBar({ title, subtitle }) {
     window.addEventListener('focus', onFocus);
     const interval = setInterval(() => {
       refreshBrokerStatus?.();
-    }, 15000);
+    }, 60000);
 
     return () => {
       window.removeEventListener('focus', onFocus);
       clearInterval(interval);
     };
-  }, [location.pathname, refreshBrokerStatus]);
+  }, [refreshBrokerStatus]);
 
   useEffect(() => {
     function onClick(e) {

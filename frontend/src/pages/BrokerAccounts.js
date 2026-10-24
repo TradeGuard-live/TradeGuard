@@ -24,7 +24,7 @@ export default function BrokerAccounts() {
       // handle { data: [...] } or [...]
       const list = Array.isArray(data) ? data : data.data || [];
       setAccounts(list);
-      refreshBrokerStatus?.();
+      refreshBrokerStatus?.(list);
     } catch (err) {
       setError(err.message || 'Failed to load broker accounts');
     } finally {

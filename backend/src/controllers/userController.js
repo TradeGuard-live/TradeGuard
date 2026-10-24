@@ -39,27 +39,24 @@ export async function login(req, res) {
             { expiresIn: "1d" }
         );
 
-        // Check and verify user's broker account tokens live upon login
-        let verifiedBrokerAccounts = [];
+        // Fetch user's broker accounts directly from DB without blocking login
+        let userBrokerAccounts = [];
         try {
-            const accounts = await BrokerAccount.find({ userId: user._id });
-            await Promise.all(
-                accounts.map(acc => verifyBrokerCredentials(acc).catch(() => false))
-            );
-            verifiedBrokerAccounts = accounts.map(acc => ({
+            const accounts = await BrokerAccount.find({ userId: user._id }).lean();
+            userBrokerAccounts = accounts.map(acc => ({
                 id: acc._id,
                 broker: acc.broker,
-                isConnected: acc.isConnected,
+                isConnected: Boolean(acc.isConnected),
                 lastConnectedAt: acc.lastConnectedAt
             }));
         } catch (e) {
-            console.warn("Broker verification on login warning:", e.message);
+            console.warn("Broker accounts load on login notice:", e.message);
         }
 
         res.status(200).json({
             token,
             user: { id: user._id, userId: user._id, username: user.username, email: user.email },
-            brokerAccounts: verifiedBrokerAccounts
+            brokerAccounts: userBrokerAccounts
         });
     }
     catch (error) {

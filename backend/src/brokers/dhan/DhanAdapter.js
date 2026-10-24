@@ -41,7 +41,7 @@ class DhanAdapter {
 
         this.client = axios.create({
             baseURL: this.baseURL,
-            timeout: 10000,
+            timeout: 5000,
             headers: this.headers
         });
     }
@@ -64,7 +64,7 @@ class DhanAdapter {
                 try {
                     const sandboxClient = axios.create({
                         baseURL: this.sandboxURL,
-                        timeout: 10000,
+                        timeout: 5000,
                         headers: this.headers
                     });
                     const res = await sandboxClient.request({

@@ -149,7 +149,7 @@ class LiveWebSocketService {
             const brokerAuth = {};
 
             try {
-                let accountQuery = { isActive: true };
+                let accountQuery = { isActive: true, isConnected: true };
                 if (mongoose.Types.ObjectId.isValid(uId)) {
                     accountQuery.userId = new mongoose.Types.ObjectId(uId);
                 }
@@ -165,7 +165,10 @@ class LiveWebSocketService {
                                 const upstoxPos = await upstox.getPositions();
                                 if (Array.isArray(upstoxPos)) brokerPositions.push(...upstoxPos);
                             } catch (e) {
-                                // Token might be expired or market closed, ignore
+                                if (e.status === 401 || e.errorCode === "UDAPI100050" || String(e.message || "").includes("UDAPI100050")) {
+                                    acc.isConnected = false;
+                                    await acc.save().catch(() => {});
+                                }
                             }
                         }
                     } else if (acc.broker === "DHAN" && acc.credentials?.accessToken) {
@@ -182,7 +185,10 @@ class LiveWebSocketService {
                                     brokerPositions.push(...mapped);
                                 }
                             } catch (e) {
-                                // Token might be expired or market closed, ignore
+                                if (e.status === 401 || e.status === 403) {
+                                    acc.isConnected = false;
+                                    await acc.save().catch(() => {});
+                                }
                             }
                         }
                     } else if (acc.broker === "ANGEL_ONE") {
@@ -192,7 +198,7 @@ class LiveWebSocketService {
                         const password = acc.credentials?.password ? decrypt(acc.credentials.password) : (acc.credentials?.apiSecret ? decrypt(acc.credentials.apiSecret) : "");
                         const totpSecret = acc.credentials?.totpSecret ? decrypt(acc.credentials.totpSecret) : "";
                         
-                        if (token || (clientCode && password)) {
+                        if (token) {
                             brokerAuth.angelToken = token;
                             brokerAuth.angelApiKey = apiKey;
                             const angel = new AngelOneAdapter({
@@ -203,13 +209,16 @@ class LiveWebSocketService {
                                 accessToken: token
                             });
                             try {
-                                const angelPos = await angel.getPositions();
+                                const angelPos = await angel.getPositions({ noAutoLogin: true });
                                 if (Array.isArray(angelPos)) {
                                     const mapped = angelPos.map(mapAngelOnePosition).filter(Boolean);
                                     brokerPositions.push(...mapped);
                                 }
                             } catch (e) {
-                                // Token might be expired or market closed, ignore
+                                if (e.status === 401 || e.errorCode === "AG8001" || e.errorCode === "AB8050") {
+                                    acc.isConnected = false;
+                                    await acc.save().catch(() => {});
+                                }
                             }
                         }
                     } else if (acc.broker === "KOTAK_NEO") {
@@ -222,7 +231,7 @@ class LiveWebSocketService {
                         const sid = acc.credentials?.sid ? decrypt(acc.credentials.sid) : "";
                         const baseUrl = acc.credentials?.baseUrl || "https://cis.kotaksecurities.com";
 
-                        if (token || (clientCode && password && mobileNumber)) {
+                        if (token) {
                             brokerAuth.kotakToken = token;
                             brokerAuth.kotakApiKey = apiKey;
                             brokerAuth.kotakSid = sid;
@@ -239,13 +248,16 @@ class LiveWebSocketService {
                                 baseUrl
                             });
                             try {
-                                const kotakPos = await kotak.getPositions();
+                                const kotakPos = await kotak.getPositions({ noAutoLogin: true });
                                 if (Array.isArray(kotakPos)) {
                                     const mapped = kotakPos.map(mapKotakNeoPosition).filter(Boolean);
                                     brokerPositions.push(...mapped);
                                 }
                             } catch (e) {
-                                // Token might be expired or market closed, ignore
+                                if (e.status === 401 || e.status === 403 || String(e.message || "").toLowerCase().includes("session")) {
+                                    acc.isConnected = false;
+                                    await acc.save().catch(() => {});
+                                }
                             }
                         }
                     }

@@ -187,10 +187,12 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                 refreshToken
             });
 
-            // If token exists, test via getRMS or getProfile
+            // If token exists, test via getRMS with noAutoLogin
+            let tokenValid = false;
             if (token) {
                 try {
-                    await adapter.getRMS();
+                    await adapter.getRMS({ noAutoLogin: true });
+                    tokenValid = true;
                     if (!brokerAccount.isConnected) {
                         brokerAccount.isConnected = true;
                         brokerAccount.lastConnectedAt = new Date();
@@ -202,8 +204,8 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                 }
             }
 
-            // Attempt login if credentials are present
-            if (clientCode && password && (totpSecret || apiKey)) {
+            // Attempt login if credentials are present and token was invalid
+            if (!tokenValid && clientCode && password && (totpSecret || apiKey)) {
                 await adapter.login();
                 if (adapter.jwtToken) {
                     brokerAccount.credentials.accessToken = adapter.jwtToken;
@@ -275,10 +277,12 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                 baseUrl
             });
 
-            // If token exists, test via getFundLimits or getOrderBook
+            // If token exists, test via getFundLimits with noAutoLogin: true
+            let tokenValid = false;
             if (token) {
                 try {
-                    await adapter.getFundLimits();
+                    await adapter.getFundLimits({ noAutoLogin: true });
+                    tokenValid = true;
                     if (!brokerAccount.isConnected) {
                         brokerAccount.isConnected = true;
                         brokerAccount.lastConnectedAt = new Date();
@@ -291,8 +295,8 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                 }
             }
 
-            // Attempt login if credentials are present
-            if (clientCode && password && mobileNumber && (totpSecret || apiKey)) {
+            // Attempt login once if credentials are present and token was not valid
+            if (!tokenValid && clientCode && password && mobileNumber && (totpSecret || apiKey)) {
                 await adapter.login();
                 if (adapter.tradingToken) {
                     brokerAccount.credentials.accessToken = adapter.tradingToken;
@@ -486,10 +490,12 @@ const getBrokerAccounts = async (req, res) => {
             .find(filter)
             .sort({ createdAt: -1 });
 
-        // Actively verify live connection status with broker API
-        await Promise.all(
-            brokerAccounts.map(account => verifyBrokerCredentials(account).catch(() => false))
-        );
+        // Only verify live connection status if explicitly requested (e.g. ?verify=true)
+        if (req.query.verify === "true" || req.query.verify === true) {
+            await Promise.all(
+                brokerAccounts.map(account => verifyBrokerCredentials(account).catch(() => false))
+            );
+        }
 
         // Sanitize sensitive credentials
         const sanitized = brokerAccounts.map(acc => {

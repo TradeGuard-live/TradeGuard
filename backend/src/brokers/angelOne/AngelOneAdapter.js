@@ -9,6 +9,8 @@ import { generateTOTP, extractSecretFromInput } from "../../utils/totp.js";
  * order/trade books, RMS limits, positions, holdings, and market data.
  */
 class AngelOneAdapter {
+    static _lastLoginFailure = null;
+
     /**
      * @param {Object} params
      * @param {string} [params.apiKey] - SmartAPI App API Key (X-PrivateKey)
@@ -92,7 +94,7 @@ class AngelOneAdapter {
                 method,
                 url,
                 headers,
-                timeout: 12000,
+                timeout: options.timeout || 5000,
                 ...(data ? { data } : {})
             };
 
@@ -125,7 +127,10 @@ class AngelOneAdapter {
                 String(msg).toLowerCase().includes("token expired") ||
                 String(msg).toLowerCase().includes("invalid token");
 
-            if (isAuthExpired && !options._retried) {
+            const now = Date.now();
+            const isInCooldown = AngelOneAdapter._lastLoginFailure && (now - AngelOneAdapter._lastLoginFailure < 60000);
+
+            if (isAuthExpired && !options._retried && !options.noAutoLogin && !isInCooldown) {
                 try {
                     console.log("[AngelOneAdapter] Access token expired, attempting automatic session refresh/relogin...");
                     let refreshed = false;
@@ -155,6 +160,7 @@ class AngelOneAdapter {
                         return await this._request(method, path, data, { ...options, _retried: true });
                     }
                 } catch (retryErr) {
+                    AngelOneAdapter._lastLoginFailure = Date.now();
                     console.warn("[AngelOneAdapter] Auto-recovery failed:", retryErr.message);
                 }
             }
@@ -266,8 +272,8 @@ class AngelOneAdapter {
      * Fetches user profile information.
      * Endpoint: GET /rest/secure/angelbroking/user/v1/getProfile
      */
-    async getProfile() {
-        const res = await this._request("GET", "/rest/secure/angelbroking/user/v1/getProfile");
+    async getProfile(options = {}) {
+        const res = await this._request("GET", "/rest/secure/angelbroking/user/v1/getProfile", null, options);
         return res?.data || {};
     }
 
@@ -275,16 +281,16 @@ class AngelOneAdapter {
      * Fetches RMS / available funds and limits.
      * Endpoint: GET /rest/secure/angelbroking/user/v1/getRMS
      */
-    async getRMS() {
-        const res = await this._request("GET", "/rest/secure/angelbroking/user/v1/getRMS");
+    async getRMS(options = {}) {
+        const res = await this._request("GET", "/rest/secure/angelbroking/user/v1/getRMS", null, options);
         return res?.data || {};
     }
 
     /**
      * Alias for getRMS to conform to common broker adapter interface
      */
-    async getFundLimits() {
-        return await this.getRMS();
+    async getFundLimits(options = {}) {
+        return await this.getRMS(options);
     }
 
     // ----------------------------------------------------------------------
@@ -343,9 +349,9 @@ class AngelOneAdapter {
      * Fetches open and closed intraday / derivative positions.
      * Endpoint: GET /rest/secure/angelbroking/order/v1/getPosition
      */
-    async getPositions() {
+    async getPositions(options = {}) {
         try {
-            const res = await this._request("GET", "/rest/secure/angelbroking/order/v1/getPosition");
+            const res = await this._request("GET", "/rest/secure/angelbroking/order/v1/getPosition", null, options);
             const data = res?.data;
             if (Array.isArray(data)) return data;
             return [];

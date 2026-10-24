@@ -18,6 +18,8 @@ import { generateTOTP, extractSecretFromInput } from "../../utils/totp.js";
  * - Market data: quotes, LTP
  */
 class KotakNeoAdapter {
+    static _lastLoginFailure = null;
+
     /**
      * @param {Object} params
      * @param {string} [params.apiKey] - Neo API Access Token (copied from Neo Trade API Dashboard)
@@ -137,7 +139,7 @@ class KotakNeoAdapter {
                 method,
                 url,
                 headers,
-                timeout: 15000,
+                timeout: options.timeout || 5000,
                 ...(body ? { data: body } : {})
             };
 
@@ -185,8 +187,11 @@ class KotakNeoAdapter {
                 String(msg).toLowerCase().includes("token expired") ||
                 String(msg).toLowerCase().includes("unauthorized");
 
-            // Attempt automatic re-login once if tokens expired and login credentials exist
-            if (isAuthExpired && !options._retried && this.clientId && this.password && (this.totpSecret || options.totp)) {
+            // Attempt automatic re-login once if tokens expired, auto-login is not suppressed, not retried, and not in cooldown
+            const now = Date.now();
+            const isInCooldown = KotakNeoAdapter._lastLoginFailure && (now - KotakNeoAdapter._lastLoginFailure < 60000);
+
+            if (isAuthExpired && !options._retried && !options.noAutoLogin && !isInCooldown && this.clientId && this.password && (this.totpSecret || options.totp)) {
                 try {
                     console.log("[KotakNeoAdapter] Session expired or invalid, attempting automatic re-login...");
                     await this.login({
@@ -200,6 +205,7 @@ class KotakNeoAdapter {
 
                     return await this._request(method, path, data, { ...options, _retried: true });
                 } catch (reErr) {
+                    KotakNeoAdapter._lastLoginFailure = Date.now();
                     console.warn("[KotakNeoAdapter] Automatic re-login failed:", reErr.message);
                 }
             }
@@ -271,122 +277,130 @@ class KotakNeoAdapter {
             throw new Error("Valid 6-digit TOTP code or TOTP Secret Key is required for Kotak Neo login");
         }
 
-        // STEP 2a: Login with TOTP
-        const step2aUrl = `${this.authHost}/login/1.0/tradeApiLogin`;
-        const step2aHeaders = {
-            "Authorization": apiToken,
-            "neo-fin-key": "neotradeapi",
-            "Content-Type": "application/json",
-            "accept": "application/json"
-        };
-
-        const tryStep2a = async (codeToTry) => {
-            return await axios.post(step2aUrl, {
-                mobileNumber: mob,
-                ucc: clientUcc,
-                totp: codeToTry
-            }, {
-                headers: step2aHeaders,
-                timeout: 15000
-            });
-        };
-
-        let step2aRes;
         try {
-            step2aRes = await tryStep2a(computedTotp);
-        } catch (err) {
-            const errData = err.response?.data;
-            const errCode = errData?.error?.[0]?.code || "";
-            let recovered = false;
+            // STEP 2a: Login with TOTP
+            const step2aUrl = `${this.authHost}/login/1.0/tradeApiLogin`;
+            const step2aHeaders = {
+                "Authorization": apiToken,
+                "neo-fin-key": "neotradeapi",
+                "Content-Type": "application/json",
+                "accept": "application/json"
+            };
 
-            // If Kotak Neo rejected TOTP (10506) and we have a Base32 secret key, try adjacent 30s/60s time steps for clock drift
-            if (String(errCode) === "10506" && secret && !/^\d{6}$/.test(secret)) {
-                const nowSec = Math.floor(Date.now() / 1000);
-                for (const offset of [-30, 30, -60, 60]) {
-                    try {
-                        const altTotp = generateTOTP(secret, 30, 6, nowSec + offset);
-                        step2aRes = await tryStep2a(altTotp);
-                        recovered = true;
-                        console.log(`[KotakNeo] Recovered TOTP with clock drift offset: ${offset}s`);
-                        break;
-                    } catch {
-                        // try next offset
+            const tryStep2a = async (codeToTry) => {
+                return await axios.post(step2aUrl, {
+                    mobileNumber: mob,
+                    ucc: clientUcc,
+                    totp: codeToTry
+                }, {
+                    headers: step2aHeaders,
+                    timeout: 5000
+                });
+            };
+
+            let step2aRes;
+            try {
+                step2aRes = await tryStep2a(computedTotp);
+            } catch (err) {
+                const errData = err.response?.data;
+                const errCode = errData?.error?.[0]?.code || "";
+                const isRateLimit = err.response?.status === 429 || String(errData?.error?.[0]?.message || "").toLowerCase().includes("too many");
+                let recovered = false;
+
+                // If Kotak Neo rejected TOTP (10506) and we have a Base32 secret key, try adjacent 30s time steps for clock drift
+                if (!isRateLimit && String(errCode) === "10506" && secret && !/^\d{6}$/.test(secret)) {
+                    const nowSec = Math.floor(Date.now() / 1000);
+                    for (const offset of [-30, 30]) {
+                        try {
+                            const altTotp = generateTOTP(secret, 30, 6, nowSec + offset);
+                            step2aRes = await tryStep2a(altTotp);
+                            recovered = true;
+                            console.log(`[KotakNeo] Recovered TOTP with clock drift offset: ${offset}s`);
+                            break;
+                        } catch {
+                            // try next offset
+                        }
                     }
+                }
+
+                if (!recovered) {
+                    const errMsg = errData?.error?.[0]?.message || errData?.errMsg || errData?.message || errData?.desc || err.message;
+                    throw new Error(`Kotak Neo login failed: ${errMsg}${errCode ? ` (Code: ${errCode})` : ""}`);
                 }
             }
 
-            if (!recovered) {
-                const errMsg = errData?.error?.[0]?.message || errData?.errMsg || errData?.message || errData?.desc || err.message;
-                throw new Error(`Kotak Neo login failed: ${errMsg}${errCode ? ` (Code: ${errCode})` : ""}`);
+            const step2aData = step2aRes.data?.data || step2aRes.data;
+            const viewToken = step2aData?.token;
+            const viewSid = step2aData?.sid;
+
+            if (!viewToken || !viewSid) {
+                const msg = step2aRes.data?.emsg || step2aRes.data?.message || "Failed to obtain view session token";
+                throw new Error(`Kotak Neo Login Step 2a failed: ${msg}`);
             }
+
+            // STEP 2b: Validate with MPIN
+            const step2bUrl = `${this.authHost}/login/1.0/tradeApiValidate`;
+            const step2bHeaders = {
+                "Authorization": apiToken,
+                "neo-fin-key": "neotradeapi",
+                "sid": viewSid,
+                "Auth": viewToken,
+                "Content-Type": "application/json",
+                "accept": "application/json"
+            };
+
+            const step2bPayload = {
+                mpin: pin
+            };
+
+            let step2bRes;
+            try {
+                step2bRes = await axios.post(step2bUrl, step2bPayload, {
+                    headers: step2bHeaders,
+                    timeout: 5000
+                });
+            } catch (err) {
+                const errData = err.response?.data;
+                const errMsg = errData?.error?.[0]?.message || errData?.errMsg || errData?.message || errData?.desc || err.message;
+                const errCode = errData?.error?.[0]?.code || "";
+                throw new Error(`Kotak Neo MPIN validation failed: ${errMsg}${errCode ? ` (Code: ${errCode})` : ""}`);
+            }
+
+            const step2bData = step2bRes.data?.data || step2bRes.data;
+            const tradingToken = step2bData?.token;
+            const tradingSid = step2bData?.sid;
+            const returnedBaseUrl = step2bData?.baseUrl;
+
+            if (!tradingToken || !tradingSid) {
+                const msg = step2bRes.data?.emsg || step2bRes.data?.message || "Failed to validate MPIN";
+                throw new Error(`Kotak Neo Login Step 2b failed: ${msg}`);
+            }
+
+            // Store session state
+            this.tradingToken = tradingToken;
+            this.tradingSid = tradingSid;
+            if (returnedBaseUrl) {
+                this.baseUrl = returnedBaseUrl.replace(/\/+$/, "");
+            }
+            this.clientId = clientUcc;
+            this.mobileNumber = mob;
+            this.password = pin;
+            this.apiKey = apiToken;
+            if (secret) this.totpSecret = secret;
+
+            KotakNeoAdapter._lastLoginFailure = null;
+
+            return {
+                tradingToken: this.tradingToken,
+                tradingSid: this.tradingSid,
+                baseUrl: this.baseUrl,
+                kType: step2bData?.kType || "Trade",
+                status: "success"
+            };
+        } catch (loginErr) {
+            KotakNeoAdapter._lastLoginFailure = Date.now();
+            throw loginErr;
         }
-
-        const step2aData = step2aRes.data?.data || step2aRes.data;
-        const viewToken = step2aData?.token;
-        const viewSid = step2aData?.sid;
-
-        if (!viewToken || !viewSid) {
-            const msg = step2aRes.data?.emsg || step2aRes.data?.message || "Failed to obtain view session token";
-            throw new Error(`Kotak Neo Login Step 2a failed: ${msg}`);
-        }
-
-        // STEP 2b: Validate with MPIN
-        const step2bUrl = `${this.authHost}/login/1.0/tradeApiValidate`;
-        const step2bHeaders = {
-            "Authorization": apiToken,
-            "neo-fin-key": "neotradeapi",
-            "sid": viewSid,
-            "Auth": viewToken,
-            "Content-Type": "application/json",
-            "accept": "application/json"
-        };
-
-        const step2bPayload = {
-            mpin: pin
-        };
-
-        let step2bRes;
-        try {
-            step2bRes = await axios.post(step2bUrl, step2bPayload, {
-                headers: step2bHeaders,
-                timeout: 15000
-            });
-        } catch (err) {
-            const errData = err.response?.data;
-            const errMsg = errData?.error?.[0]?.message || errData?.errMsg || errData?.message || errData?.desc || err.message;
-            const errCode = errData?.error?.[0]?.code || "";
-            throw new Error(`Kotak Neo MPIN validation failed: ${errMsg}${errCode ? ` (Code: ${errCode})` : ""}`);
-        }
-
-        const step2bData = step2bRes.data?.data || step2bRes.data;
-        const tradingToken = step2bData?.token;
-        const tradingSid = step2bData?.sid;
-        const returnedBaseUrl = step2bData?.baseUrl;
-
-        if (!tradingToken || !tradingSid) {
-            const msg = step2bRes.data?.emsg || step2bRes.data?.message || "Failed to validate MPIN";
-            throw new Error(`Kotak Neo Login Step 2b failed: ${msg}`);
-        }
-
-        // Store session state
-        this.tradingToken = tradingToken;
-        this.tradingSid = tradingSid;
-        if (returnedBaseUrl) {
-            this.baseUrl = returnedBaseUrl.replace(/\/+$/, "");
-        }
-        this.clientId = clientUcc;
-        this.mobileNumber = mob;
-        this.password = pin;
-        this.apiKey = apiToken;
-        if (secret) this.totpSecret = secret;
-
-        return {
-            tradingToken: this.tradingToken,
-            tradingSid: this.tradingSid,
-            baseUrl: this.baseUrl,
-            kType: step2bData?.kType || "Trade",
-            status: "success"
-        };
     }
 
     // ----------------------------------------------------------------------
@@ -605,15 +619,15 @@ class KotakNeoAdapter {
      * Fetches current day's open and closed positions.
      * Endpoint: GET /quick/user/positions
      */
-    async getPositions() {
+    async getPositions(options = {}) {
         try {
-            const res = await this._request("GET", "/quick/user/positions", null, { isUrlEncoded: false });
+            const res = await this._request("GET", "/quick/user/positions", null, { isUrlEncoded: false, ...options });
             let data = res?.data;
             if (Array.isArray(data) && data.length > 0) return data;
 
             // Fallback to /portfolio/v2/positions if /quick/user/positions is empty
             try {
-                const v2Res = await this._request("GET", "/portfolio/v2/positions", null, { isUrlEncoded: false });
+                const v2Res = await this._request("GET", "/portfolio/v2/positions", null, { isUrlEncoded: false, ...options });
                 if (Array.isArray(v2Res?.data) && v2Res.data.length > 0) return v2Res.data;
             } catch {
                 // Ignore fallback error
@@ -642,9 +656,9 @@ class KotakNeoAdapter {
      * Fetches long-term delivery holdings.
      * Endpoint: GET /portfolio/v1/holdings
      */
-    async getHoldings() {
+    async getHoldings(options = {}) {
         try {
-            const res = await this._request("GET", "/portfolio/v1/holdings", null, { isUrlEncoded: false });
+            const res = await this._request("GET", "/portfolio/v1/holdings", null, { isUrlEncoded: false, ...options });
             const data = res?.data;
             if (Array.isArray(data)) return data;
             return [];
@@ -671,24 +685,24 @@ class KotakNeoAdapter {
      * Fetches account funds, margin, and collateral limits.
      * Endpoint: POST /quick/user/limits
      */
-    async getLimits({ seg = "ALL", exch = "ALL", prod = "ALL" } = {}) {
+    async getLimits({ seg = "ALL", exch = "ALL", prod = "ALL" } = {}, options = {}) {
         const jData = { seg, exch, prod };
-        const res = await this._request("POST", "/quick/user/limits", jData, { isUrlEncoded: true });
+        const res = await this._request("POST", "/quick/user/limits", jData, { isUrlEncoded: true, ...options });
         return res || {};
     }
 
     /**
      * Standard alias for RMS limits to conform with other broker adapters
      */
-    async getRMS() {
-        return await this.getLimits();
+    async getRMS(options = {}) {
+        return await this.getLimits({}, options);
     }
 
     /**
      * Standard alias for fund limits
      */
-    async getFundLimits() {
-        return await this.getLimits();
+    async getFundLimits(options = {}) {
+        return await this.getLimits({}, options);
     }
 
     // ----------------------------------------------------------------------

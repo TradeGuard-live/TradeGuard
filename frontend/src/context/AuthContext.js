@@ -31,10 +31,15 @@ export function AuthProvider({ children }) {
     setLoading(false);
   }, []);
 
-  const refreshBrokerStatus = useCallback(async () => {
+  const refreshBrokerStatus = useCallback(async (preloadedAccounts) => {
     try {
+      if (Array.isArray(preloadedAccounts)) {
+        setBrokerAccounts(preloadedAccounts);
+        localStorage.setItem('tg_broker_accounts', JSON.stringify(preloadedAccounts));
+        return preloadedAccounts;
+      }
       const res = await api.listBrokerAccounts();
-      const accounts = Array.isArray(res?.data) ? res.data : [];
+      const accounts = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []);
       setBrokerAccounts(accounts);
       localStorage.setItem('tg_broker_accounts', JSON.stringify(accounts));
       return accounts;
