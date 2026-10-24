@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { ThemeProvider } from './context/ThemeContext';
 import { ToastProvider } from './components/Toast';
 import Layout from './components/Layout';
 
@@ -38,16 +39,16 @@ function Protected({ children }) {
 }
 
 const PAGE_META = {
-  live: { title: 'Live Trading', subtitle: 'Real-time WebSocket market feed · Upstox stream' },
-  overview: { title: 'Overview', subtitle: 'Sample workspace · Last reviewed 28 Sep 2026' },
-  'broker-accounts': { title: 'Broker Accounts', subtitle: 'Sample workspace · Last reviewed 28 Sep 2026' },
-  trades: { title: 'Trades', subtitle: 'Sample workspace · Last reviewed 28 Sep 2026' },
-  analytics: { title: 'Analytics', subtitle: 'Sample workspace · Last reviewed 28 Sep 2026' },
-  charges: { title: 'Charges', subtitle: 'Sample workspace · Last reviewed 28 Sep 2026' },
-  risk: { title: 'Risk Management', subtitle: 'Sample workspace · Last reviewed 28 Sep 2026' },
-  reports: { title: 'Reports', subtitle: 'Sample workspace · Last reviewed 28 Sep 2026' },
-  'broker-comparison': { title: 'Broker Comparison', subtitle: 'Sample workspace · Last reviewed 28 Sep 2026' },
-  settings: { title: 'Settings', subtitle: 'Sample workspace · Last reviewed 28 Sep 2026' },
+  live: { title: 'Live Trading', subtitle: 'Real-time WebSocket market feed & position tracker' },
+  overview: { title: 'Overview', subtitle: 'Performance dashboard & real-time analytics' },
+  'broker-accounts': { title: 'Broker Accounts', subtitle: 'Connected trading accounts & API management' },
+  trades: { title: 'Trades', subtitle: 'Trade history, execution logs & position tracking' },
+  analytics: { title: 'Analytics', subtitle: 'Performance breakdown, win-rate & equity curve' },
+  charges: { title: 'Charges', subtitle: 'Brokerage, exchange fees & regulatory charges' },
+  risk: { title: 'Risk Management', subtitle: 'Position limits, drawdown tracking & rules' },
+  reports: { title: 'Reports', subtitle: 'Tax reporting, P&L statements & trade journals' },
+  'broker-comparison': { title: 'Broker Comparison', subtitle: 'Fee comparison, latency & broker insights' },
+  settings: { title: 'Settings', subtitle: 'Workspace preferences & security settings' },
 };
 
 function AppPage({ page, children }) {
@@ -89,11 +90,13 @@ const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
   <React.StrictMode>
     <BrowserRouter>
-      <AuthProvider>
-        <ToastProvider>
-          <AppRoutes />
-        </ToastProvider>
-      </AuthProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <ToastProvider>
+            <AppRoutes />
+          </ToastProvider>
+        </AuthProvider>
+      </ThemeProvider>
     </BrowserRouter>
   </React.StrictMode>
 );

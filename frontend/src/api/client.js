@@ -60,11 +60,15 @@ function withUserId(path, userId) {
 }
 
 export const api = {
-  // Auth
-  login: (email, password) =>
+  login: (identifier, password) =>
     request('/api/users', {
       method: 'POST',
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({
+        email: identifier,
+        username: identifier,
+        identifier,
+        password
+      }),
     }),
 
   register: (username, email, password) =>
@@ -153,6 +157,39 @@ export const api = {
     return data;
   },
 
+  importKotakNeoCsv: async (brokerAccountId, file) => {
+    const token = localStorage.getItem('tg_token');
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const res = await fetch(
+      `${API_URL}/api/webhooks/kotakneo/import-csv/${brokerAccountId}`,
+      {
+        method: 'POST',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: formData,
+      }
+    );
+
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok) {
+      throw new ApiError(
+        data?.message || `Import failed (${res.status})`,
+        res.status
+      );
+    }
+
+    return data;
+  },
+
 
   // Trades
   listTrades: (userId = getStoredUserId()) =>
@@ -164,11 +201,24 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  deleteTrade: (id) =>
+    request(`/api/trades/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
   tradeSummary: (userId = getStoredUserId()) =>
     request(withUserId('/api/trades/summary', userId)),
 
-  tradeAnalytics: (range = '30d', userId = getStoredUserId()) =>
-    request(withUserId(`/api/trades/analytics?range=${encodeURIComponent(range)}`, userId)),
+  tradeAnalytics: (range = '30d', broker = 'all', userId = getStoredUserId()) => {
+    // If second arg is a 24-char ObjectId, treat it as userId and broker as 'all'
+    if (typeof broker === 'string' && broker.length === 24 && /^[0-9a-fA-F]{24}$/.test(broker)) {
+      userId = broker;
+      broker = 'all';
+    }
+    let path = `/api/trades/analytics?range=${encodeURIComponent(range)}`;
+    if (broker && broker !== 'all') path += `&broker=${encodeURIComponent(broker)}`;
+    return request(withUserId(path, userId));
+  },
 
   chargesAnalytics: (range = '30d', broker = 'all', userId = getStoredUserId()) => {
     let path = `/api/trades/charges-analytics?range=${encodeURIComponent(range)}`;

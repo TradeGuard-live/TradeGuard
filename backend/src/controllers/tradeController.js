@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 import TradeRecord from "../models/TradeRecord.js";
 import BrokerAccount from "../models/BrokerAccount.js";
 import { calculateCharges, calculatePnL } from "../services/calculations.js";
-import brokerConfig from "../services/brokers/brokerConfig.js";
+import brokerConfig, { calculateBrokerageForLeg } from "../services/brokers/brokerConfig.js";
 import positionEngine from "../services/position/PositionEngine.js";
 import pnlEngine from "../services/pnl/PnLEngine.js";
 
@@ -123,6 +123,7 @@ export const getAnalytics = async (req, res) => {
     const objectId = new mongoose.Types.ObjectId(userId);
     const now = new Date();
     const range = String(req.query.range || "30d").toLowerCase();
+    const brokerFilter = req.query.broker;
 
     let cutoff;
     if (range === "today" || range === "1d") {
@@ -141,14 +142,26 @@ export const getAnalytics = async (req, res) => {
       cutoff = new Date(now.getTime() - 30 * 86400000);
     }
 
-    const all = await TradeRecord.find({ userId: objectId, status: "COMPLETE" }).lean();
-    const trades = all.filter(t => {
+    let all = await TradeRecord.find({ userId: objectId, status: "COMPLETE" }).lean();
+    if (!all || all.length === 0) {
+      all = await TradeRecord.find({ userId: objectId }).lean();
+    }
+
+    // Collect available brokers from all user trades
+    const availableBrokers = [...new Set(all.map(t => t.broker).filter(Boolean))];
+
+    // Apply broker filter if specified
+    const filteredAll = brokerFilter && brokerFilter !== "all"
+      ? all.filter(t => t.broker === brokerFilter)
+      : all;
+
+    const trades = filteredAll.filter(t => {
       const d = effectiveTradeDate(t);
       return d && d >= cutoff && d <= now;
     }).sort((a,b) => effectiveTradeDate(a)-effectiveTradeDate(b));
 
     // Include pre-range executions so positions opened earlier can be matched to exits in range.
-    const closes = buildRealizedMatches(all).filter(c => c.date >= cutoff && c.date <= now);
+    const closes = buildRealizedMatches(filteredAll).filter(c => c.date >= cutoff && c.date <= now);
     const byDay = new Map();
     for (const c of closes) {
       const key = c.date.toISOString().slice(0,10);
@@ -276,7 +289,7 @@ export const getAnalytics = async (req, res) => {
 
     const brokerPnL = [...brokerMap.entries()].map(([broker, data]) => ({
       broker,
-      name: brokerConfig.brokers[broker]?.name || (broker === "ANGEL_ONE" ? "Angel One" : broker),
+      name: brokerConfig.brokers[broker]?.name || (broker === "ANGEL_ONE" ? "Angel One" : broker === "KOTAK_NEO" ? "Kotak Neo" : broker),
       value: Math.round((data.pnl + Number.EPSILON) * 100) / 100,
       trades: data.trades
     })).sort((a, b) => b.trades - a.trades);
@@ -331,12 +344,22 @@ export const getAnalytics = async (req, res) => {
         const name = dayNames[dayIdx];
         activity.set(name, (activity.get(name) || 0) + 1);
       }
-      dailyActivity = dayNames.map(name => ({
-        label: name,
-        day: dayFullNames[name],
-        value: activity.get(name) || 0,
-        dateRange: `${dayFullNames[name]} — ${activity.get(name) || 0} trades in last 30 days`
-      }));
+      dailyActivity = dayNames.map(name => {
+        const val = activity.get(name) || 0;
+        let note = `${dayFullNames[name]} — ${val} trades in last 30 days`;
+        if (name === 'Sun' && val > 0) {
+          note = `Sunday (Special Budget Day Session · 1 Feb 2026) — ${val} trades`;
+        } else if (name === 'Sat' && val > 0) {
+          note = `Saturday (Special Muhurat / DR Session) — ${val} trades`;
+        }
+        return {
+          label: name,
+          day: dayFullNames[name],
+          value: val,
+          dateRange: note,
+          isWeekend: name === 'Sat' || name === 'Sun'
+        };
+      });
     } else {
       // 90d, 1y, all -> Mon-Sun breakdown with full day names and context
       const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -350,12 +373,22 @@ export const getAnalytics = async (req, res) => {
         activity.set(name, (activity.get(name) || 0) + 1);
       }
       const periodName = range === 'all' ? 'All Time' : (range === '1y' ? 'Past 1 Year' : 'Past 90 Days');
-      dailyActivity = dayNames.map(name => ({
-        label: name,
-        day: dayFullNames[name],
-        value: activity.get(name) || 0,
-        dateRange: `${dayFullNames[name]} — ${activity.get(name) || 0} trades (${periodName})`
-      }));
+      dailyActivity = dayNames.map(name => {
+        const val = activity.get(name) || 0;
+        let note = `${dayFullNames[name]} — ${val} trades (${periodName})`;
+        if (name === 'Sun' && val > 0) {
+          note = `Sunday (Special Union Budget Session · 1 Feb 2026) — ${val} trades`;
+        } else if (name === 'Sat' && val > 0) {
+          note = `Saturday (Special Muhurat / DR Session) — ${val} trades`;
+        }
+        return {
+          label: name,
+          day: dayFullNames[name],
+          value: val,
+          dateRange: note,
+          isWeekend: name === 'Sat' || name === 'Sun'
+        };
+      });
     }
     const wins=closes.filter(c=>c.pnl>0), losses=closes.filter(c=>c.pnl<0);
     return res.json({success:true,data:{
@@ -363,7 +396,10 @@ export const getAnalytics = async (req, res) => {
       averageWin:wins.length?wins.reduce((s,c)=>s+c.pnl,0)/wins.length:0,
       averageLoss:losses.length?Math.abs(losses.reduce((s,c)=>s+c.pnl,0)/losses.length):0,
       winningTrades:wins.length,losingTrades:losses.length,
-      realizedPnL:closes.reduce((s,c)=>s+c.pnl,0),closedTrades:closes.length
+      realizedPnL:closes.reduce((s,c)=>s+c.pnl,0),closedTrades:closes.length,
+      totalTrades: trades.length,
+      availableBrokers,
+      selectedBroker: brokerFilter || "all"
     }});
   } catch(error) {
     console.error("Analytics error:",error.message);
@@ -617,22 +653,140 @@ export const getBrokerComparison = async (req, res) => {
     const accounts = await BrokerAccount.find({ userId: objectId }).lean();
     const connectedBrokers = new Set(accounts.filter(a => a.isConnected).map(a => a.broker));
 
-    const brokers = Object.entries(brokerConfig.brokers).map(([key, config]) => ({
-      broker: key,
-      name: config.name,
-      delivery: config.brokerage?.equityDelivery?.type === "FLAT" && config.brokerage?.equityDelivery?.amount === 0
-        ? "₹0"
-        : `₹${config.brokerage?.equityDelivery?.amount || 20}/order`,
-      intraday: config.brokerage?.equityIntraday?.type === "FLAT"
-        ? `₹${config.brokerage?.equityIntraday?.amount || 20}/order`
-        : `₹${config.brokerage?.equityIntraday?.flat || 20}/order`,
-      segments: key === "UPSTOX" ? "Equity, F&O, Currency" : key === "ANGEL_ONE" ? "Equity, F&O, Commodity, Currency" : "Equity, F&O, Commodity",
-      connection: connectedBrokers.has(key) ? "Connected" : "Not configured"
-    }));
+    const brokerList = [];
+
+    // Upstox
+    const upstox = brokerConfig.brokers.UPSTOX;
+    brokerList.push({
+      broker: "UPSTOX",
+      name: upstox.name,
+      planName: "Standard",
+      accountOpening: upstox.accountOpening.display,
+      accountOpeningDetails: upstox.accountOpening.details,
+      amc: upstox.amc,
+      delivery: upstox.displayValues.delivery,
+      intraday: upstox.displayValues.intraday,
+      futures: upstox.displayValues.futures,
+      options: upstox.displayValues.options,
+      commodities: upstox.displayValues.commodities,
+      currency: upstox.displayValues.currency,
+      dpCharges: upstox.displayValues.dpCharges,
+      autoSquareOff: upstox.displayValues.autoSquareOff,
+      callAndTrade: upstox.displayValues.callAndTrade,
+      apiCharges: upstox.displayValues.apiCharges,
+      segments: upstox.segments,
+      highlights: upstox.highlights,
+      connection: connectedBrokers.has("UPSTOX") ? "Connected" : "Not configured"
+    });
+
+    // Dhan
+    const dhan = brokerConfig.brokers.DHAN;
+    brokerList.push({
+      broker: "DHAN",
+      name: dhan.name,
+      planName: "Standard",
+      accountOpening: dhan.accountOpening.display,
+      accountOpeningDetails: dhan.accountOpening.details,
+      amc: dhan.amc,
+      delivery: dhan.displayValues.delivery,
+      intraday: dhan.displayValues.intraday,
+      futures: dhan.displayValues.futures,
+      options: dhan.displayValues.options,
+      commodities: dhan.displayValues.commodities,
+      currency: dhan.displayValues.currency,
+      dpCharges: dhan.displayValues.dpCharges,
+      autoSquareOff: dhan.displayValues.autoSquareOff,
+      callAndTrade: dhan.displayValues.callAndTrade,
+      apiCharges: dhan.displayValues.apiCharges,
+      segments: dhan.segments,
+      highlights: dhan.highlights,
+      connection: connectedBrokers.has("DHAN") ? "Connected" : "Not configured"
+    });
+
+    // Angel One
+    const angel = brokerConfig.brokers.ANGEL_ONE;
+    brokerList.push({
+      broker: "ANGEL_ONE",
+      name: angel.name,
+      planName: "iTrade Prime",
+      accountOpening: angel.accountOpening.display,
+      accountOpeningDetails: angel.accountOpening.details,
+      amc: angel.amc,
+      delivery: angel.displayValues.delivery,
+      intraday: angel.displayValues.intraday,
+      futures: angel.displayValues.futures,
+      options: angel.displayValues.options,
+      commodities: angel.displayValues.commodities,
+      currency: angel.displayValues.currency,
+      dpCharges: angel.displayValues.dpCharges,
+      autoSquareOff: angel.displayValues.autoSquareOff,
+      callAndTrade: angel.displayValues.callAndTrade,
+      apiCharges: angel.displayValues.apiCharges,
+      segments: angel.segments,
+      highlights: angel.highlights,
+      promotionalOffer: angel.promotionalOffer,
+      connection: connectedBrokers.has("ANGEL_ONE") ? "Connected" : "Not configured"
+    });
+
+    // Kotak Neo - Trade Free Plan (Standard / 30+)
+    const kotak = brokerConfig.brokers.KOTAK_NEO;
+    const kotakTF = kotak.plans.TRADE_FREE;
+    brokerList.push({
+      broker: "KOTAK_NEO",
+      name: "Kotak Neo (Trade Free)",
+      planId: "TRADE_FREE",
+      planName: "Trade Free Plan (All ages / 30+)",
+      accountOpening: kotakTF.accountOpening.display,
+      accountOpeningDetails: kotakTF.accountOpening.details,
+      amc: kotakTF.amc,
+      delivery: kotakTF.displayValues.delivery,
+      intraday: kotakTF.displayValues.intraday,
+      futures: kotakTF.displayValues.futures,
+      options: kotakTF.displayValues.options,
+      commodities: kotakTF.displayValues.commodities,
+      currency: kotakTF.displayValues.currency,
+      dpCharges: kotakTF.displayValues.dpCharges,
+      autoSquareOff: kotakTF.displayValues.autoSquareOff,
+      callAndTrade: kotakTF.displayValues.callAndTrade,
+      apiCharges: kotakTF.displayValues.apiCharges,
+      segments: "Equity, F&O, Commodity, Currency",
+      highlights: kotakTF.highlights,
+      promotionalOffer: kotakTF.promotionalOffer,
+      connection: connectedBrokers.has("KOTAK_NEO") ? "Connected" : "Not configured"
+    });
+
+    // Kotak Neo - Trade Free Youth (<30 yrs)
+    const kotakYouth = kotak.plans.YOUTH;
+    brokerList.push({
+      broker: "KOTAK_NEO_YOUTH",
+      name: "Kotak Neo (Youth Plan)",
+      planId: "YOUTH",
+      planName: "Trade Free Youth (< 30 yrs)",
+      accountOpening: kotakYouth.accountOpening.display,
+      accountOpeningDetails: kotakYouth.accountOpening.details,
+      amc: kotakYouth.amc,
+      delivery: kotakYouth.displayValues.delivery,
+      intraday: kotakYouth.displayValues.intraday,
+      futures: kotakYouth.displayValues.futures,
+      options: kotakYouth.displayValues.options,
+      commodities: kotakYouth.displayValues.commodities,
+      currency: kotakYouth.displayValues.currency,
+      dpCharges: kotakYouth.displayValues.dpCharges,
+      autoSquareOff: kotakYouth.displayValues.autoSquareOff,
+      callAndTrade: kotakYouth.displayValues.callAndTrade,
+      apiCharges: kotakYouth.displayValues.apiCharges,
+      segments: "Equity, F&O, Commodity, Currency",
+      highlights: kotakYouth.highlights,
+      promotionalOffer: kotakYouth.promotionalOffer,
+      connection: connectedBrokers.has("KOTAK_NEO") ? "Connected" : "Not configured"
+    });
 
     return res.json({
       success: true,
-      data: { brokers }
+      data: {
+        brokers: brokerList,
+        config: brokerConfig
+      }
     });
   } catch (error) {
     console.error("Broker comparison error:", error.message);
@@ -640,46 +794,139 @@ export const getBrokerComparison = async (req, res) => {
   }
 };
 
-export const calculateTradeCharges = async (req,res) => {
+export const calculateTradeCharges = async (req, res) => {
   try {
-    const {broker,productType,buyPrice,sellPrice,quantity,exchange="NSE"}=req.body;
-    const buy=Number(buyPrice), sell=Number(sellPrice), qty=Number(quantity);
-    if(!broker||!productType||!Number.isFinite(buy)||!Number.isFinite(sell)||!Number.isFinite(qty)||buy<=0||sell<=0||qty<=0)
-      return res.status(400).json({success:false,message:"broker, productType, positive buyPrice, sellPrice and quantity are required"});
-    const cfg=brokerConfig.brokers[broker]; if(!cfg)return res.status(400).json({success:false,message:"Invalid broker"});
-    const p=String(productType).toLowerCase().replace(/[^a-z]/g,"");
-    const key=p.includes("future")?"equityFutures":p.includes("option")?"equityOptions":p.includes("delivery")?"equityDelivery":"equityIntraday";
-    const rate=cfg.brokerage?.[key]; if(!rate)return res.status(400).json({success:false,message:`Brokerage configuration missing for ${key}`});
-    const buyTurn=buy*qty, sellTurn=sell*qty, totalTurn=buyTurn+sellTurn;
-    const brokerageFor=(turn)=> {
-      if(rate.type==="FLAT")return Number(rate.amount||0);
-      if(rate.type==="LOWER_OF")return Math.min(Number(rate.flat||0),turn*Number(rate.percentage||0)/100);
-      if(rate.type==="PERCENTAGE")return turn*Number(rate.percentage||0)/100;
-      return 0;
-    };
-    const brokerage=brokerageFor(buyTurn)+brokerageFor(sellTurn);
-    const exchangeCfg=brokerConfig.exchangeCharges?.[exchange]?.[key] || brokerConfig.exchangeCharges?.NSE?.[key];
-    const sttCfg=brokerConfig.statutoryCharges.STT[key];
-    const stampCfg=brokerConfig.statutoryCharges.stampDuty[key];
-    if(!exchangeCfg||!sttCfg||!stampCfg)return res.status(400).json({success:false,message:`Charge configuration missing for ${key}`});
-    const basisValue=(basis,side)=> {
-      if(basis==="PREMIUM")return side==="buy"?buyTurn:sellTurn;
-      return side==="buy"?buyTurn:sellTurn;
-    };
-    const exchangeCharges=(basisValue(exchangeCfg.basis,"buy")*Number(exchangeCfg.buy||0)/100)+(basisValue(exchangeCfg.basis,"sell")*Number(exchangeCfg.sell||0)/100);
-    const stt=(basisValue(sttCfg.basis,"buy")*Number(sttCfg.buy||0)/100)+(basisValue(sttCfg.basis,"sell")*Number(sttCfg.sell||0)/100);
-    const stampDuty=(buyTurn*Number(stampCfg.buy||0)/100)+(sellTurn*Number(stampCfg.sell||0)/100);
-    const sebi=(totalTurn*0.000001); // ₹10 per crore = 0.0001% of turnover
-    const gst=(brokerage+exchangeCharges+sebi)*0.18;
-    const dpCharges=key==="equityDelivery"?(Number(cfg.dpCharges?.equityDelivery?.sell||cfg.dpCharges?.equityDelivery?.amount||0)):0;
-    const totalCharges=brokerage+stt+exchangeCharges+sebi+stampDuty+gst+dpCharges;
-    const grossPnL=(sell-buy)*qty;
-    const round=n=>Math.round((n+Number.EPSILON)*100)/100;
-    return res.json({success:true,data:{brokerage:round(brokerage),stt:round(stt),exchangeCharges:round(exchangeCharges),
-      sebiCharges:round(sebi),stampDuty:round(stampDuty),dpCharges:round(dpCharges),gst:round(gst),
-      totalCharges:round(totalCharges),grossPnL:round(grossPnL),netPnL:round(grossPnL-totalCharges),
-      assumptions:{broker,productType:key,exchange,quantity:qty,brokeragePlan:cfg.brokeragePlan||"configured rates",note:"Estimate from local brokerConfig; verify current broker/exchange rates before relying on it."}}});
-  }catch(error){console.error("Calculate charges error:",error.message);return res.status(500).json({success:false,message:error.message||"Failed to calculate charges"});}
+    const {
+      broker,
+      plan = "STANDARD",
+      productType,
+      buyPrice,
+      sellPrice,
+      quantity,
+      exchange = "NSE",
+      daysSinceOnboarding = 999,
+      waivedBrokerageSoFar = 0,
+      isPhysicalDelivery = false
+    } = req.body;
+
+    const buy = Number(buyPrice);
+    const sell = Number(sellPrice);
+    const qty = Number(quantity);
+
+    if (!broker || !productType || !Number.isFinite(buy) || !Number.isFinite(sell) || !Number.isFinite(qty) || buy <= 0 || sell <= 0 || qty <= 0) {
+      return res.status(400).json({ success: false, message: "broker, productType, positive buyPrice, sellPrice and quantity are required" });
+    }
+
+    const buyTurnover = buy * qty;
+    const sellTurnover = sell * qty;
+    const totalTurnover = buyTurnover + sellTurnover;
+
+    // Calculate Buy leg brokerage
+    const buyLeg = calculateBrokerageForLeg({
+      broker,
+      plan,
+      productType,
+      turnover: buyTurnover,
+      daysSinceOnboarding,
+      waivedBrokerageSoFar,
+      isPhysicalDelivery
+    });
+
+    // Calculate Sell leg brokerage
+    const sellLeg = calculateBrokerageForLeg({
+      broker,
+      plan,
+      productType,
+      turnover: sellTurnover,
+      daysSinceOnboarding,
+      waivedBrokerageSoFar: Number(waivedBrokerageSoFar) + buyLeg.waived,
+      isPhysicalDelivery
+    });
+
+    const brokerage = buyLeg.brokerage + sellLeg.brokerage;
+    const totalWaived = buyLeg.waived + sellLeg.waived;
+
+    // Determine segment key
+    const p = String(productType).toLowerCase().replace(/[^a-z]/g, "");
+    const isDelivery = p.includes("deliv") || p === "cnc";
+    const isOptions = p.includes("option");
+    const isFutures = p.includes("future");
+    const isCommodity = p.includes("comm") || p.includes("mcx");
+    const isCurrency = p.includes("curr") || p.includes("fx");
+
+    let rateKey = "equityIntraday";
+    if (isDelivery) rateKey = "equityDelivery";
+    else if (isOptions) rateKey = "equityOptions";
+    else if (isFutures) rateKey = "equityFutures";
+    else if (isCommodity) rateKey = isOptions ? "commodityOptions" : "commodityFutures";
+    else if (isCurrency) rateKey = isOptions ? "currencyOptions" : "currencyFutures";
+
+    // Exchange charges
+    const exCharges = brokerConfig.exchangeCharges[exchange] || brokerConfig.exchangeCharges.NSE;
+    const exRateConfig = exCharges[rateKey] || exCharges.equityIntraday;
+    const exRate = (exRateConfig?.rate || 0.00297) / 100;
+    const exBasis = exRateConfig?.basis || "TURNOVER";
+    const exchangeCharges = (exBasis === "PREMIUM" ? (buyTurnover + sellTurnover) : totalTurnover) * exRate;
+
+    // STT
+    const sttCfg = brokerConfig.statutoryCharges.STT[rateKey] || brokerConfig.statutoryCharges.STT.equityIntraday;
+    const stt = (buyTurnover * ((sttCfg.buy || 0) / 100)) + (sellTurnover * ((sttCfg.sell || 0) / 100));
+
+    // Stamp duty (Buy side only)
+    const stampCfg = brokerConfig.statutoryCharges.stampDuty[rateKey] || brokerConfig.statutoryCharges.stampDuty.equityIntraday;
+    const stampDuty = buyTurnover * ((stampCfg.buy || 0) / 100);
+
+    // SEBI turnover charges (₹10 per crore = 0.0001%)
+    const sebiCharges = totalTurnover * 0.000001;
+
+    // GST: 18% on (brokerage + exchangeCharges + sebiCharges)
+    const gst = (brokerage + exchangeCharges + sebiCharges) * 0.18;
+
+    // DP charges: only on delivery sell side
+    let dpCharges = 0;
+    if (isDelivery) {
+      if (broker.includes("DHAN")) dpCharges = 12.50;
+      else if (broker.includes("KOTAK")) dpCharges = 15.00;
+      else dpCharges = 20.00; // Upstox, Angel One
+    }
+
+    const totalCharges = brokerage + stt + exchangeCharges + sebiCharges + stampDuty + gst + dpCharges;
+    const grossPnL = (sell - buy) * qty;
+    const netPnL = grossPnL - totalCharges;
+
+    const round = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+    return res.json({
+      success: true,
+      data: {
+        brokerage: round(brokerage),
+        waivedBrokerage: round(totalWaived),
+        stt: round(stt),
+        exchangeCharges: round(exchangeCharges),
+        sebiCharges: round(sebiCharges),
+        stampDuty: round(stampDuty),
+        dpCharges: round(dpCharges),
+        gst: round(gst),
+        totalCharges: round(totalCharges),
+        grossPnL: round(grossPnL),
+        netPnL: round(netPnL),
+        assumptions: {
+          broker,
+          plan,
+          productType: rateKey,
+          exchange,
+          quantity: qty,
+          daysSinceOnboarding,
+          effectiveRateBuy: buyLeg.effectiveRate,
+          effectiveRateSell: sellLeg.effectiveRate,
+          note: "Audited official broker and statutory charges (Finance Act 2024 / SEBI norms)."
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Calculate charges error:", error.message);
+    return res.status(500).json({ success: false, message: error.message || "Failed to calculate charges" });
+  }
 };
 
 export const getLiveTradingSummary = async (req, res) => {
@@ -846,7 +1093,7 @@ export const getChargesAnalytics = async (req, res) => {
     }
     const brokerBreakdown = [...brokerChargesMap.entries()].map(([broker, data]) => ({
       broker,
-      name: brokerConfig.brokers[broker]?.name || (broker === "ANGEL_ONE" ? "Angel One" : broker),
+      name: brokerConfig.brokers[broker]?.name || (broker === "ANGEL_ONE" ? "Angel One" : broker === "KOTAK_NEO" ? "Kotak Neo" : broker),
       charges: round(data.charges),
       trades: data.trades,
       turnover: round(data.turnover),
@@ -972,4 +1219,28 @@ export const createTrade = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message || "Failed to create trade" });
   }
 };
+
+export const deleteTrade = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Valid trade ID required" });
+    }
+
+    const deleted = await TradeRecord.findByIdAndDelete(id);
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: "Trade record not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Trade ${deleted.symbol} (${deleted.transactionType} ${deleted.quantity}) deleted successfully`,
+      data: deleted
+    });
+  } catch (error) {
+    console.error("Delete trade error:", error.message);
+    return res.status(500).json({ success: false, message: "Failed to delete trade" });
+  }
+};
+
 

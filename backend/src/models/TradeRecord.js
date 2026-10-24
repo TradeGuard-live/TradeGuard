@@ -20,7 +20,8 @@ const tradeRecordSchema = new mongoose.Schema(
             enum: [
                 "UPSTOX",
                 "ANGEL_ONE",
-                "DHAN"
+                "DHAN",
+                "KOTAK_NEO"
             ],
             required: true
         },
@@ -96,7 +97,8 @@ const tradeRecordSchema = new mongoose.Schema(
         },
 
         productCode: {
-            type: String
+            type: String,
+            default: "INTRADAY"
         },
 
         tradeTime: {

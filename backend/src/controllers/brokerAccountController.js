@@ -1,11 +1,14 @@
 import mongoose from "mongoose";
 import axios from "axios";
 import BrokerAccount from "../models/BrokerAccount.js";
+import TradeRecord from "../models/TradeRecord.js";
 import { syncUpstoxHistoricalTrades, syncUpstoxTodayTrades } from "../brokers/upstox/UpstoxSyncService.js";
 import { syncDhanHistoricalTrades, syncDhanTodayTrades } from "../brokers/dhan/DhanSyncService.js";
 import DhanAdapter from "../brokers/dhan/DhanAdapter.js";
 import { syncAngelOneHistoricalTrades, syncAngelOneTodayTrades } from "../brokers/angelOne/AngelOneSyncService.js";
 import AngelOneAdapter from "../brokers/angelOne/AngelOneAdapter.js";
+import { syncKotakNeoHistoricalTrades, syncKotakNeoTodayTrades } from "../brokers/kotakNeo/KotakNeoSyncService.js";
+import KotakNeoAdapter from "../brokers/kotakNeo/KotakNeoAdapter.js";
 import { decrypt, encrypt } from "../utils/encryption.js";
 
 /**
@@ -227,6 +230,98 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
         }
     }
 
+    if (brokerAccount.broker === "KOTAK_NEO") {
+        let token = null;
+        if (brokerAccount.credentials?.accessToken) {
+            try {
+                token = decrypt(brokerAccount.credentials.accessToken);
+            } catch {
+                token = brokerAccount.credentials.accessToken;
+            }
+        }
+
+        const apiKey = brokerAccount.credentials?.apiKey ? decrypt(brokerAccount.credentials.apiKey) : "";
+        const clientCode = brokerAccount.credentials?.clientId || "";
+        const mobileNumber = brokerAccount.credentials?.mobileNumber ? decrypt(brokerAccount.credentials.mobileNumber) : "";
+        const password = brokerAccount.credentials?.password 
+            ? decrypt(brokerAccount.credentials.password) 
+            : (brokerAccount.credentials?.apiSecret ? decrypt(brokerAccount.credentials.apiSecret) : "");
+        const totpSecret = brokerAccount.credentials?.totpSecret 
+            ? decrypt(brokerAccount.credentials.totpSecret) 
+            : "";
+        const sid = brokerAccount.credentials?.sid 
+            ? decrypt(brokerAccount.credentials.sid) 
+            : (brokerAccount.credentials?.feedToken ? decrypt(brokerAccount.credentials.feedToken) : "");
+        const baseUrl = brokerAccount.credentials?.baseUrl || "https://cis.kotaksecurities.com";
+
+        // If no token and not enough credentials to perform login, set disconnected
+        if (!token && (!clientCode || !password || !mobileNumber || (!totpSecret && !apiKey))) {
+            if (brokerAccount.isConnected) {
+                brokerAccount.isConnected = false;
+                await brokerAccount.save();
+            }
+            return false;
+        }
+
+        try {
+            const adapter = new KotakNeoAdapter({
+                apiKey,
+                clientId: clientCode,
+                mobileNumber,
+                password,
+                totpSecret,
+                accessToken: token,
+                sid,
+                baseUrl
+            });
+
+            // If token exists, test via getFundLimits or getOrderBook
+            if (token) {
+                try {
+                    await adapter.getFundLimits();
+                    if (!brokerAccount.isConnected) {
+                        brokerAccount.isConnected = true;
+                        brokerAccount.lastConnectedAt = new Date();
+                        await brokerAccount.save();
+                    }
+                    return true;
+                } catch (tErr) {
+                    // Token expired, continue to login attempt below
+                    console.log("[Kotak Neo] Session token expired/invalid, attempting fresh login:", tErr.message);
+                }
+            }
+
+            // Attempt login if credentials are present
+            if (clientCode && password && mobileNumber && (totpSecret || apiKey)) {
+                await adapter.login();
+                if (adapter.tradingToken) {
+                    brokerAccount.credentials.accessToken = adapter.tradingToken;
+                    if (adapter.tradingSid) brokerAccount.credentials.sid = adapter.tradingSid;
+                    if (adapter.baseUrl) brokerAccount.credentials.baseUrl = adapter.baseUrl;
+                    brokerAccount.isConnected = true;
+                    brokerAccount.lastConnectedAt = new Date();
+                    await brokerAccount.save();
+                    return true;
+                }
+            }
+
+            if (brokerAccount.isConnected) {
+                brokerAccount.isConnected = false;
+                await brokerAccount.save();
+            }
+            brokerAccount._verificationError = "Missing required credentials for Kotak Neo login (Client ID, MPIN, Mobile, and TOTP Key / Neo API Token).";
+            return false;
+        } catch (error) {
+            console.error("Kotak Neo verify error:", error.message);
+            brokerAccount._verificationError = error.message;
+            if (brokerAccount.isConnected) {
+                brokerAccount.isConnected = false;
+                await brokerAccount.save();
+            }
+            return false;
+        }
+    }
+
     // For other brokers
     if (!brokerAccount.credentials?.accessToken && !brokerAccount.credentials?.apiKey) {
         if (brokerAccount.isConnected) {
@@ -343,6 +438,8 @@ const createBrokerAccount = async (req, res) => {
             delete response.credentials.password;
             delete response.credentials.totpSecret;
             delete response.credentials.feedToken;
+            delete response.credentials.mobileNumber;
+            delete response.credentials.sid;
         }
 
         return res.status(201).json({
@@ -397,6 +494,7 @@ const getBrokerAccounts = async (req, res) => {
         // Sanitize sensitive credentials
         const sanitized = brokerAccounts.map(acc => {
             const doc = acc.toObject ? acc.toObject() : { ...acc };
+            doc.verificationError = acc._verificationError || null;
             if (doc.credentials) {
                 delete doc.credentials.apiKey;
                 delete doc.credentials.apiSecret;
@@ -405,6 +503,8 @@ const getBrokerAccounts = async (req, res) => {
                 delete doc.credentials.password;
                 delete doc.credentials.totpSecret;
                 delete doc.credentials.feedToken;
+                delete doc.credentials.mobileNumber;
+                delete doc.credentials.sid;
             }
             return doc;
         });
@@ -559,9 +659,14 @@ const updateBrokerAccount = async (req, res) => {
                     credentials.totpSecret;
             }
 
-            if (credentials.feedToken !== undefined) {
-                brokerAccount.credentials.feedToken =
-                    credentials.feedToken;
+            if (credentials.mobileNumber !== undefined) {
+                brokerAccount.credentials.mobileNumber =
+                    credentials.mobileNumber;
+            }
+
+            if (credentials.sid !== undefined) {
+                brokerAccount.credentials.sid =
+                    credentials.sid;
             }
         }
 
@@ -591,6 +696,8 @@ const updateBrokerAccount = async (req, res) => {
         }
 
         const response = brokerAccount.toObject();
+        response.isConnected = brokerAccount.isConnected;
+        response.verificationError = brokerAccount._verificationError || null;
 
         if (response.credentials) {
             delete response.credentials.apiKey;
@@ -600,11 +707,17 @@ const updateBrokerAccount = async (req, res) => {
             delete response.credentials.password;
             delete response.credentials.totpSecret;
             delete response.credentials.feedToken;
+            delete response.credentials.mobileNumber;
+            delete response.credentials.sid;
         }
 
         return res.status(200).json({
             success: true,
-            message: "Broker account updated successfully",
+            message: brokerAccount.isConnected
+                ? "Broker account updated and connected successfully!"
+                : (brokerAccount._verificationError
+                    ? `Broker account updated, but connection failed: ${brokerAccount._verificationError}`
+                    : "Broker account updated successfully"),
             data: response
         });
 
@@ -633,7 +746,7 @@ const updateBrokerAccount = async (req, res) => {
 
 const deleteBrokerAccount = async (req, res) => {
     try {
-        const { brokerAccountId } = req.params;
+        const brokerAccountId = req.params.brokerAccountId || req.params.id;
 
         if (!brokerAccountId) {
             return res.status(400).json({
@@ -785,6 +898,18 @@ const syncBrokerTrades = async (req, res) => {
                     brokerAccountId: id
                 });
             }
+        } else if (brokerAccount.broker === "KOTAK_NEO") {
+            if (startDate && endDate) {
+                result = await syncKotakNeoHistoricalTrades({
+                    brokerAccountId: id,
+                    startDate,
+                    endDate
+                });
+            } else {
+                result = await syncKotakNeoTodayTrades({
+                    brokerAccountId: id
+                });
+            }
         } else {
             return res.status(400).json({
                 success: false,
@@ -838,7 +963,7 @@ const verifyBrokerAccount = async (req, res) => {
             isConnected,
             message: isConnected
                 ? "Broker account credentials are valid and connected!"
-                : "Broker access token is expired or invalid. Please update credentials."
+                : (brokerAccount._verificationError || "Broker access token is expired or invalid. Please update credentials.")
         });
     } catch (error) {
         console.error("Verify broker account error:", error);

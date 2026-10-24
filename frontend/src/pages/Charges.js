@@ -34,6 +34,7 @@ export default function Charges() {
 
   // Simulator
   const [broker, setBroker]           = useState('UPSTOX');
+  const [kotakPlan, setKotakPlan]     = useState('TRADE_FREE');
   const [productType, setProductType] = useState('Equity intraday');
   const [buyPrice, setBuyPrice]       = useState(125);
   const [sellPrice, setSellPrice]     = useState(132.5);
@@ -63,14 +64,21 @@ export default function Charges() {
     async function calc() {
       setSimLoading(true); setSimError('');
       try {
-        const res = await api.calculateCharges({ broker, productType, buyPrice: Number(buyPrice), sellPrice: Number(sellPrice), quantity: Number(quantity) });
+        const res = await api.calculateCharges({
+          broker,
+          plan: broker.startsWith('KOTAK') ? kotakPlan : 'STANDARD',
+          productType,
+          buyPrice: Number(buyPrice),
+          sellPrice: Number(sellPrice),
+          quantity: Number(quantity)
+        });
         if (active) setSimResult(res?.data || null);
       } catch (err) { if (active) setSimError(err.message || 'Failed to calculate'); }
       finally { if (active) setSimLoading(false); }
     }
     const t = setTimeout(calc, 300);
     return () => { active = false; clearTimeout(t); };
-  }, [broker, productType, buyPrice, sellPrice, quantity, activeTab]);
+  }, [broker, kotakPlan, productType, buyPrice, sellPrice, quantity, activeTab]);
 
   const fmt = (n) => '₹' + Number(Math.abs(n || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -381,6 +389,15 @@ export default function Charges() {
                   {Object.entries(BROKER_META).map(([k, m]) => <option key={k} value={k}>{m.name}</option>)}
                 </select>
               </div>
+              {broker.startsWith('KOTAK') && (
+                <div className="form-group">
+                  <label className="form-label">Plan</label>
+                  <select id="sim-kotak-plan" className="form-select" value={kotakPlan} onChange={e => setKotakPlan(e.target.value)}>
+                    <option value="TRADE_FREE">Trade Free Plan (Standard / 30+ yrs)</option>
+                    <option value="YOUTH">Trade Free Youth (&lt; 30 yrs)</option>
+                  </select>
+                </div>
+              )}
               <div className="form-group">
                 <label className="form-label">Product type</label>
                 <select id="sim-product" className="form-select" value={productType} onChange={e => setProductType(e.target.value)}>

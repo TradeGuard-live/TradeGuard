@@ -14,12 +14,14 @@ import TradeRecord from "../../models/TradeRecord.js";
 import BrokerAccount from "../../models/BrokerAccount.js";
 import positionEngine from "../position/PositionEngine.js";
 import pnlEngine from "../pnl/PnLEngine.js";
-import marketDataEngine from "../marketData/MarketDataEngine.js";
+import marketDataEngine, { isIndianMarketOpen } from "../marketData/MarketDataEngine.js";
 import UpstoxAdapter from "../../brokers/upstox/UpstoxAdaptor.js";
 import DhanAdapter from "../../brokers/dhan/DhanAdapter.js";
 import { mapDhanPosition } from "../../brokers/dhan/DhanMapper.js";
 import AngelOneAdapter from "../../brokers/angelOne/AngelOneAdapter.js";
 import { mapAngelOnePosition } from "../../brokers/angelOne/AngelOneMapper.js";
+import KotakNeoAdapter from "../../brokers/kotakNeo/KotakNeoAdapter.js";
+import { mapKotakNeoPosition } from "../../brokers/kotakNeo/KotakNeoMapper.js";
 import { decrypt } from "../../utils/encryption.js";
 
 class LiveWebSocketService {
@@ -140,10 +142,7 @@ class LiveWebSocketService {
 
             let trades = await TradeRecord.find(query).lean();
 
-            // If user has no trades yet, look for any trades in DB as demo/preview data
-            if (!trades || trades.length === 0) {
-                trades = await TradeRecord.find({}).limit(50).lean();
-            }
+            // User trades loaded
 
             // 2. Check for active Upstox account to get broker positions & token
             let brokerPositions = [];
@@ -213,6 +212,42 @@ class LiveWebSocketService {
                                 // Token might be expired or market closed, ignore
                             }
                         }
+                    } else if (acc.broker === "KOTAK_NEO") {
+                        const token = acc.credentials?.accessToken ? decrypt(acc.credentials.accessToken) : "";
+                        const apiKey = acc.credentials?.apiKey ? decrypt(acc.credentials.apiKey) : "";
+                        const clientCode = acc.credentials?.clientId || "";
+                        const mobileNumber = acc.credentials?.mobileNumber ? decrypt(acc.credentials.mobileNumber) : "";
+                        const password = acc.credentials?.password ? decrypt(acc.credentials.password) : (acc.credentials?.apiSecret ? decrypt(acc.credentials.apiSecret) : "");
+                        const totpSecret = acc.credentials?.totpSecret ? decrypt(acc.credentials.totpSecret) : "";
+                        const sid = acc.credentials?.sid ? decrypt(acc.credentials.sid) : "";
+                        const baseUrl = acc.credentials?.baseUrl || "https://cis.kotaksecurities.com";
+
+                        if (token || (clientCode && password && mobileNumber)) {
+                            brokerAuth.kotakToken = token;
+                            brokerAuth.kotakApiKey = apiKey;
+                            brokerAuth.kotakSid = sid;
+                            brokerAuth.kotakBaseUrl = baseUrl;
+
+                            const kotak = new KotakNeoAdapter({
+                                apiKey,
+                                clientId: clientCode,
+                                mobileNumber,
+                                password,
+                                totpSecret,
+                                accessToken: token,
+                                sid,
+                                baseUrl
+                            });
+                            try {
+                                const kotakPos = await kotak.getPositions();
+                                if (Array.isArray(kotakPos)) {
+                                    const mapped = kotakPos.map(mapKotakNeoPosition).filter(Boolean);
+                                    brokerPositions.push(...mapped);
+                                }
+                            } catch (e) {
+                                // Token might be expired or market closed, ignore
+                            }
+                        }
                     }
                 }
             } catch (err) {
@@ -228,40 +263,6 @@ class LiveWebSocketService {
                 openPositions = positionEngine.reconcileWithBrokerPositions(openPositions, brokerPositions);
             }
 
-            // If there are still no open positions (e.g. all squared or empty DB), provide a starter position
-            if (openPositions.length === 0 && trades.length === 0) {
-                openPositions = [
-                    {
-                        key: "DEMO|NSE|EQUITY|RELIANCE|INTRADAY",
-                        symbol: "RELIANCE",
-                        exchange: "NSE",
-                        segment: "EQUITY",
-                        productType: "INTRADAY",
-                        instrumentToken: "NSE_EQ|INE002A01018",
-                        openQuantity: 25,
-                        netQuantity: 25,
-                        averagePrice: 2950.00,
-                        realizedPnL: 1250.00,
-                        status: "OPEN",
-                        side: "BUY"
-                    },
-                    {
-                        key: "DEMO|NSE|EQUITY|TCS|INTRADAY",
-                        symbol: "TCS",
-                        exchange: "NSE",
-                        segment: "EQUITY",
-                        productType: "INTRADAY",
-                        instrumentToken: "NSE_EQ|INE467B01029",
-                        openQuantity: 15,
-                        netQuantity: 15,
-                        averagePrice: 4120.00,
-                        realizedPnL: 640.00,
-                        status: "PARTIALLY_SQUARED",
-                        side: "BUY"
-                    }
-                ];
-            }
-
             // 4. Set positions in P&L Engine
             pnlEngine.setPositions(uId, openPositions);
 
@@ -274,6 +275,7 @@ class LiveWebSocketService {
                 type: "INITIAL_DATA",
                 data: {
                     ...initialSnapshot,
+                    isMarketOpen: isIndianMarketOpen(),
                     allPositions: allMatchedPositions,
                     squaredPositions: positionEngine.getFullySquaredPositions(trades)
                 }
@@ -295,7 +297,10 @@ class LiveWebSocketService {
         if (updatedData) {
             this.broadcast(uId, {
                 type: "LIVE_PNL_UPDATE",
-                data: updatedData
+                data: {
+                    ...updatedData,
+                    isMarketOpen: isIndianMarketOpen()
+                }
             });
         }
     }

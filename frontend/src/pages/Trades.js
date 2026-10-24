@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Card } from '../components/Card';
-import { X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
 import { api } from '../api/client';
+import { useToast } from '../components/Toast';
 
 function getTradeDate(trade) {
   return trade.tradeTime || trade.executedAt || trade.createdAt || trade.updatedAt || null;
@@ -45,6 +46,7 @@ function getExecutionId(trade) {
 }
 
 export default function Trades() {
+  const toast = useToast();
   const [trades, setTrades] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -52,8 +54,10 @@ export default function Trades() {
   const [range, setRange] = useState('all');
   const [broker, setBroker] = useState('all');
   const [side, setSide] = useState('all');
+  const [product, setProduct] = useState('all');
   const [search, setSearch] = useState('');
   const [drawerTrade, setDrawerTrade] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
 
   useEffect(() => {
     let active = true;
@@ -125,11 +129,19 @@ export default function Trades() {
 
         if (side !== 'all' && trade.transactionType !== side) return false;
 
+        if (product !== 'all') {
+          const prod = String(trade.productCode || trade.productType || 'INTRADAY').toUpperCase();
+          if (product === 'INTRADAY' && !prod.includes('INTRA') && !prod.includes('MIS')) return false;
+          if (product === 'DELIVERY' && !prod.includes('DELIV') && !prod.includes('CNC')) return false;
+        }
+
         if (query) {
           const searchableText = [
             trade.symbol,
             trade.tradeId,
             trade.orderId,
+            trade.productCode,
+            trade.productType,
             trade._id,
           ]
             .filter(Boolean)
@@ -146,7 +158,29 @@ export default function Trades() {
           new Date(getTradeDate(b)).getTime() -
           new Date(getTradeDate(a)).getTime()
       );
-  }, [trades, range, broker, side, search]);
+  }, [trades, range, broker, side, product, search]);
+
+  async function handleDeleteTrade(trade, e) {
+    if (e) e.stopPropagation();
+    if (!trade?._id) return;
+
+    const confirmMsg = `Are you sure you want to delete this trade: ${trade.symbol} (${trade.transactionType} ${trade.quantity} @ ${formatINR(getExecutionPrice(trade))})?`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setDeletingId(trade._id);
+    try {
+      await api.deleteTrade(trade._id);
+      setTrades((prev) => prev.filter((t) => t._id !== trade._id));
+      if (drawerTrade?._id === trade._id) {
+        setDrawerTrade(null);
+      }
+      toast.push('Trade deleted successfully', 'success');
+    } catch (err) {
+      toast.push(err.message || 'Failed to delete trade', 'error');
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   return (
     <>
@@ -216,6 +250,16 @@ export default function Trades() {
               <option value="BUY">Buy</option>
               <option value="SELL">Sell</option>
             </select>
+
+            <select
+              className="filter-select"
+              value={product}
+              onChange={(event) => setProduct(event.target.value)}
+            >
+              <option value="all">All products</option>
+              <option value="INTRADAY">Intraday (MIS)</option>
+              <option value="DELIVERY">Delivery (CNC)</option>
+            </select>
           </div>
         </div>
 
@@ -226,12 +270,14 @@ export default function Trades() {
                 <th>Date</th>
                 <th>Symbol</th>
                 <th>Broker</th>
+                <th>Product</th>
                 <th>Side</th>
                 <th className="text-right">Qty</th>
                 <th className="text-right">Execution price</th>
                 <th>Order type</th>
                 <th>Order ID</th>
                 <th>Trade ID</th>
+                <th className="text-center">Action</th>
               </tr>
             </thead>
 
@@ -239,7 +285,7 @@ export default function Trades() {
               {!loading && filtered.length === 0 && (
                 <tr>
                   <td
-                    colSpan={9}
+                    colSpan={11}
                     style={{
                       textAlign: 'center',
                       padding: 40,
@@ -254,6 +300,7 @@ export default function Trades() {
               {filtered.map((trade) => {
                 const date = getTradeDate(trade);
                 const sideValue = trade.transactionType;
+                const productCode = trade.productCode || trade.productType || 'INTRADAY';
 
                 return (
                   <tr
@@ -281,11 +328,26 @@ export default function Trades() {
                           color: 'var(--text-muted)',
                         }}
                       >
-                        {trade.segment || trade.exchange || '—'}
+                        {trade.exchange || 'NSE'} · {trade.segment || 'EQUITY'}
                       </div>
                     </td>
 
                     <td>{trade.broker || '—'}</td>
+
+                    <td>
+                      <span
+                        className="badge"
+                        style={{
+                          fontSize: '11px',
+                          textTransform: 'uppercase',
+                          background: 'rgba(59, 130, 246, 0.12)',
+                          color: '#60a5fa',
+                          border: '1px solid rgba(59, 130, 246, 0.25)'
+                        }}
+                      >
+                        {productCode}
+                      </span>
+                    </td>
 
                     <td>
                       <span
@@ -320,6 +382,27 @@ export default function Trades() {
                       {trade.orderId || ('ORD-' + (trade.tradeId || trade._id))}
                     </td>
                     <td className="mono" style={{ fontSize: '12px' }}>{trade.tradeId || '—'}</td>
+                    <td className="text-center" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        className="icon-btn"
+                        title="Delete this trade"
+                        onClick={(e) => handleDeleteTrade(trade, e)}
+                        disabled={deletingId === trade._id}
+                        style={{
+                          color: '#ef4444',
+                          background: 'rgba(239, 68, 68, 0.1)',
+                          border: '1px solid rgba(239, 68, 68, 0.25)',
+                          padding: '5px 8px',
+                          borderRadius: '6px',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center'
+                        }}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
@@ -386,6 +469,7 @@ export default function Trades() {
             {[
               ['Symbol', drawerTrade.symbol],
               ['Broker', drawerTrade.broker],
+              ['Product', drawerTrade.productCode || drawerTrade.productType || 'INTRADAY'],
               ['Side', drawerTrade.transactionType],
               ['Quantity', drawerTrade.quantity],
               [
@@ -395,7 +479,7 @@ export default function Trades() {
                   : formatINR(getExecutionPrice(drawerTrade)),
               ],
               ['Order type', drawerTrade.orderType || 'MARKET'],
-              ['Segment', drawerTrade.segment || drawerTrade.exchange || 'EQUITY'],
+              ['Segment', `${drawerTrade.exchange || 'NSE'} · ${drawerTrade.segment || 'EQUITY'}`],
               ['Order ID', drawerTrade.orderId || ('ORD-' + (drawerTrade.tradeId || drawerTrade._id))],
               ['Trade ID', drawerTrade.tradeId || '—'],
               ['Status', drawerTrade.status],
@@ -412,16 +496,33 @@ export default function Trades() {
               </div>
             ))}
 
-            <div
+            <button
+              className="btn btn-secondary w-full"
               style={{
                 marginTop: 20,
+                background: 'rgba(239, 68, 68, 0.12)',
+                color: '#ef4444',
+                borderColor: 'rgba(239, 68, 68, 0.3)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                padding: '10px'
+              }}
+              onClick={(e) => handleDeleteTrade(drawerTrade, e)}
+              disabled={deletingId === drawerTrade._id}
+            >
+              <Trash2 size={15} /> Delete this trade execution
+            </button>
+
+            <div
+              style={{
+                marginTop: 16,
                 fontSize: 12,
                 color: 'var(--text-muted)',
               }}
             >
-              Realized P&amp;L is not shown for an individual execution. It
-              requires matching buy and sell executions and applying the
-              selected accounting method.
+              Realized P&amp;L is matched across buy and sell executions according to your selected accounting method.
             </div>
           </div>
         </>

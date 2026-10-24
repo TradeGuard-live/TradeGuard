@@ -8,7 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import { BROKER_META } from '../data/mockData';
 
 export default function BrokerAccounts() {
-  const { user } = useAuth();
+  const { user, refreshBrokerStatus } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
   const [accounts, setAccounts] = useState([]);
@@ -24,6 +24,7 @@ export default function BrokerAccounts() {
       // handle { data: [...] } or [...]
       const list = Array.isArray(data) ? data : data.data || [];
       setAccounts(list);
+      refreshBrokerStatus?.();
     } catch (err) {
       setError(err.message || 'Failed to load broker accounts');
     } finally {
@@ -67,9 +68,9 @@ export default function BrokerAccounts() {
     try {
       const res = await api.verifyBrokerAccount(id);
       if (res.isConnected) {
-        toast.push('Credentials verified — Broker account is connected!', 'success');
+        toast.push(res.message || 'Credentials verified — Broker account is connected!', 'success');
       } else {
-        toast.push('Broker access token is expired or invalid. Please update credentials.', 'warning');
+        toast.push(res.message || 'Broker access token is expired or invalid. Please update credentials.', 'warning');
       }
       await load();
     } catch (err) {
@@ -86,9 +87,11 @@ export default function BrokerAccounts() {
   const [importingId, setImportingId] = useState(null);
   const fileInputRef = React.useRef(null);
   const importTargetId = React.useRef(null);
+  const importTargetBroker = React.useRef(null);
 
-  function handleImportClick(accId) {
+  function handleImportClick(accId, broker) {
     importTargetId.current = accId;
+    importTargetBroker.current = broker;
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
       fileInputRef.current.click();
@@ -99,9 +102,12 @@ export default function BrokerAccounts() {
     const file = e.target.files?.[0];
     if (!file || !importTargetId.current) return;
 
+    const broker = importTargetBroker.current;
     setImportingId(importTargetId.current);
     try {
-      const response = await api.importAngelOneCsv(importTargetId.current, file);
+      const response = broker === 'KOTAK_NEO'
+        ? await api.importKotakNeoCsv(importTargetId.current, file)
+        : await api.importAngelOneCsv(importTargetId.current, file);
       const data = response?.data;
       if (data) {
         toast.push(
@@ -113,7 +119,8 @@ export default function BrokerAccounts() {
       }
       await load();
     } catch (err) {
-      toast.push(err.message || 'Failed to import CSV', 'error');
+      const errMsg = err.response?.data?.message || err.message || 'Failed to import file';
+      toast.push(errMsg, 'error');
     } finally {
       setImportingId(null);
       importTargetId.current = null;
@@ -125,16 +132,12 @@ export default function BrokerAccounts() {
       <div className="page-header page-header-row">
         <div>
           <h1 className="page-title">Broker accounts</h1>
-          <p className="page-description">Review and manage demo broker connections.</p>
+          <p className="page-description">Review and manage connected broker accounts and trade synchronization.</p>
         </div>
         <button className="btn btn-primary" onClick={() => navigate('/app/broker-accounts/new')}>
           <Link2 size={15} /> Connect broker
         </button>
       </div>
-
-      <InfoBanner icon={AlertTriangle}>
-        Connection states and sync times are illustrative. No broker credentials are used.
-      </InfoBanner>
 
       {loading && (
         <div className="broker-grid">
@@ -200,16 +203,23 @@ export default function BrokerAccounts() {
                 <div style={{ marginTop: 6 }}>
                   {!acc.isActive ? (
                     <span className="badge badge-warning">
-                      <span className="badge-dot" /> Action needed
+                      <span className="badge-dot" /> Inactive
                     </span>
                   ) : connected ? (
                     <span className="badge badge-success">
                       <span className="badge-dot" /> Connected &amp; Valid
                     </span>
                   ) : (
-                    <span className="badge" style={{ background: 'rgba(239, 68, 68, 0.12)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.25)' }}>
-                      <span className="badge-dot" style={{ background: '#ef4444' }} /> Not Connected (Token Expired)
-                    </span>
+                    <div>
+                      <span className="badge" style={{ background: 'rgba(239, 68, 68, 0.12)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.25)' }}>
+                        <span className="badge-dot" style={{ background: '#ef4444' }} /> Not Connected
+                      </span>
+                      {acc.verificationError && (
+                        <div style={{ fontSize: 11, color: '#f87171', marginTop: 5, lineHeight: 1.3 }}>
+                          {acc.verificationError}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
 
@@ -248,7 +258,7 @@ export default function BrokerAccounts() {
                     ) : connected ? (
                       <><RefreshCw size={14} /> Sync trades</>
                     ) : (
-                      <><Link2 size={14} /> Update Credentials / Token</>
+                      <><Link2 size={14} /> Update Credentials</>
                     )}
                   </button>
 
@@ -261,13 +271,13 @@ export default function BrokerAccounts() {
                     {verifyingId === acc._id ? 'Checking with Broker API...' : 'Test Broker Live Status'}
                   </button>
 
-                  {acc.broker?.toUpperCase() === 'ANGEL_ONE' && (
+                  {(acc.broker?.toUpperCase() === 'ANGEL_ONE' || acc.broker?.toUpperCase() === 'KOTAK_NEO') && (
                     <button
                       className="btn btn-secondary w-full"
-                      style={{ fontSize: 12, padding: '6px 12px', borderColor: 'rgba(255, 138, 0, 0.4)' }}
-                      onClick={() => handleImportClick(acc._id)}
+                      style={{ fontSize: 12, padding: '6px 12px', borderColor: acc.broker?.toUpperCase() === 'KOTAK_NEO' ? 'rgba(225, 29, 72, 0.4)' : 'rgba(255, 138, 0, 0.4)' }}
+                      onClick={() => handleImportClick(acc._id, acc.broker?.toUpperCase())}
                       disabled={importingId === acc._id}
-                      title="Import past trades from Angel One TradeBook CSV or Excel export"
+                      title={`Import past trades from ${meta.name} TradeBook CSV or Excel export`}
                     >
                       {importingId === acc._id ? (
                         <><span className="spinner" /> Importing trades…</>

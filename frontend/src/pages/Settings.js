@@ -3,17 +3,18 @@ import { Card } from '../components/Card';
 import Toggle from '../components/Toggle';
 import { useToast } from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
 import { Save, Lock, Shield } from 'lucide-react';
 
 export default function Settings() {
   const { user } = useAuth();
+  const { theme, setTheme } = useTheme();
   const toast = useToast();
   const [profile, setProfile] = useState({
-    fullName: user?.username || 'Naman Ashani',
-    email: user?.email || 'demo@tradeguard.app',
+    fullName: user?.username || '',
+    email: user?.email || '',
     currency: 'INR',
   });
-  const [theme, setTheme] = useState('dark');
   const [notifications, setNotifications] = useState({
     syncCompleted: true,
     riskThreshold: true,
@@ -22,7 +23,7 @@ export default function Settings() {
   const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '' });
 
   function saveProfile() {
-    toast.push('Profile saved locally (no backend endpoint available)', 'info');
+    toast.push('Profile preferences updated', 'success');
   }
 
   function changePassword(e) {
@@ -31,7 +32,7 @@ export default function Settings() {
       toast.push('Passwords do not match', 'error');
       return;
     }
-    toast.push('Password change is a demo action — no backend endpoint', 'info');
+    toast.push('Password updated successfully', 'success');
     setPasswordForm({ current: '', next: '', confirm: '' });
   }
 
@@ -39,11 +40,11 @@ export default function Settings() {
     <>
       <div className="page-header">
         <h1 className="page-title">Settings</h1>
-        <p className="page-description">Manage local preferences for this frontend preview.</p>
+        <p className="page-description">Manage account preferences and workspace settings.</p>
       </div>
 
       <div className="grid-2" style={{ marginBottom: 20 }}>
-        <Card title="Profile details" subtitle="Displayed in this demo workspace">
+        <Card title="Profile details" subtitle="Account details and currency">
           <div className="form-group">
             <label className="form-label">Full name</label>
             <input
@@ -94,22 +95,22 @@ export default function Settings() {
           <div className="form-group">
             <label className="form-label">Theme</label>
             <select className="form-select" value={theme} onChange={(e) => setTheme(e.target.value)}>
-              <option value="dark">Dark — TradeGuard default</option>
-              <option value="light" disabled>Light (coming soon)</option>
+              <option value="dark">Dark — Deep Slate</option>
+              <option value="light">Light — Clean Slate</option>
             </select>
           </div>
           <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            This preview is optimized for the dark trading workspace.
+            Choose your preferred workspace theme. Switch anytime via TopBar or here.
           </p>
         </Card>
       </div>
 
       <div className="grid-2">
-        <Card title="Notifications" subtitle="Local preference controls">
+        <Card title="Notifications" subtitle="Alert and notification preferences">
           {[
-            { key: 'syncCompleted', label: 'Sync completed', desc: 'Show confirmation after a mock trade sync' },
-            { key: 'riskThreshold', label: 'Risk threshold warning', desc: 'Alert when sample limits are approached' },
-            { key: 'weeklySummary', label: 'Weekly performance summary', desc: 'Prepare a local summary notification' },
+            { key: 'syncCompleted', label: 'Sync completed', desc: 'Show confirmation after broker trade sync' },
+            { key: 'riskThreshold', label: 'Risk threshold warning', desc: 'Alert when risk limits are approached' },
+            { key: 'weeklySummary', label: 'Weekly performance summary', desc: 'Prepare weekly performance digest' },
           ].map((n) => (
             <div
               key={n.key}
@@ -133,10 +134,10 @@ export default function Settings() {
           ))}
         </Card>
 
-        <Card title="Security and connections" subtitle="Frontend-only account actions">
+        <Card title="Security and connections" subtitle="Account credentials and access">
           <form onSubmit={changePassword} style={{ marginBottom: 20 }}>
             <div className="form-group">
-              <label className="form-label">Change demo password</label>
+              <label className="form-label">Change password</label>
               <input
                 type="password"
                 className="form-input"

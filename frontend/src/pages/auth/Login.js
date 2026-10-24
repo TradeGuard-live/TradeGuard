@@ -6,7 +6,7 @@ import { useAuth } from '../../context/AuthContext';
 export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
-  const [email, setEmail] = useState('');
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -14,13 +14,13 @@ export default function Login() {
   async function onSubmit(e) {
     e.preventDefault();
     setError('');
-    if (!email || !password) {
-      setError('Email and password are required');
+    if (!identifier.trim() || !password) {
+      setError('Username/Email and password are required');
       return;
     }
     setLoading(true);
     try {
-      await login(email, password);
+      await login(identifier.trim(), password);
       navigate('/app/overview');
     } catch (err) {
       setError(err.message || 'Login failed');
@@ -40,14 +40,14 @@ export default function Login() {
 
         <form onSubmit={onSubmit}>
           <div className="form-group">
-            <label className="form-label">Email</label>
+            <label className="form-label">Username or Email</label>
             <input
-              type="email"
+              type="text"
               className="form-input"
-              placeholder="you@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoComplete="email"
+              placeholder="Username or you@example.com"
+              value={identifier}
+              onChange={(e) => setIdentifier(e.target.value)}
+              autoComplete="username"
             />
           </div>
 

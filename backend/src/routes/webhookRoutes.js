@@ -1,7 +1,8 @@
 import express from "express";
 import {
     angelOnePostback,
-    angelOneImportCsv
+    angelOneImportCsv,
+    kotakNeoImportCsv
 } from "../controllers/webhookController.js";
 import multer from "multer";
 
@@ -43,6 +44,16 @@ router.post(
     "/angelone/import-csv/:brokerAccountId",
     upload.single("file"),
     angelOneImportCsv
+);
+
+// --------------------
+// Kotak Neo CSV Import (historical trade import)
+// --------------------
+// POST /api/webhooks/kotakneo/import-csv/:brokerAccountId
+router.post(
+    "/kotakneo/import-csv/:brokerAccountId",
+    upload.single("file"),
+    kotakNeoImportCsv
 );
 
 export default router;

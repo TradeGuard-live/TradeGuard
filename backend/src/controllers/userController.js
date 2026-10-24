@@ -10,12 +10,23 @@ dotenv.config();
 
 export async function login(req, res) {
     try {
-        const { email, password } = req.body;
+        const { email, username, identifier: rawId, loginId, password } = req.body;
+        const identifier = String(rawId || email || username || loginId || "").trim();
 
-        const user = await User.findOne({ email });
+        if (!identifier || !password) {
+            return res.status(400).json({ message: "Username or email and password are required" });
+        }
+
+        // Find user by either email (case-insensitive) or username (case-insensitive)
+        const user = await User.findOne({
+            $or: [
+                { email: identifier.toLowerCase() },
+                { username: new RegExp(`^${identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+            ]
+        });
 
         if (!user) {
-            return res.status(404).json({ message: "User not found" });
+            return res.status(404).json({ message: "User not found with this username or email" });
         }
 
         const isPasswordCorrect = await bcrypt.compare(password, user.password);

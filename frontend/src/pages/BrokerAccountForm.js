@@ -10,7 +10,7 @@ import { BROKER_META } from '../data/mockData';
 export default function BrokerAccountForm() {
   const { id } = useParams();
   const isEdit = !!id;
-  const { user } = useAuth();
+  const { user, refreshBrokerStatus } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -23,6 +23,7 @@ export default function BrokerAccountForm() {
     refreshToken: '',
     password: '',
     totpSecret: '',
+    mobileNumber: '',
     tokenExpiresAt: '',
     isActive: true,
   });
@@ -54,6 +55,7 @@ export default function BrokerAccountForm() {
             refreshToken: '',
             password: '',
             totpSecret: '',
+            mobileNumber: '',
             tokenExpiresAt: '',
           }));
         }
@@ -96,9 +98,10 @@ export default function BrokerAccountForm() {
         if (form.refreshToken) payload.credentials.refreshToken = form.refreshToken;
         if (form.password) payload.credentials.password = form.password;
         if (form.totpSecret) payload.credentials.totpSecret = form.totpSecret;
+        if (form.mobileNumber) payload.credentials.mobileNumber = form.mobileNumber;
         if (form.tokenExpiresAt) payload.credentials.tokenExpiresAt = form.tokenExpiresAt;
-        await api.updateBrokerAccount(id, payload);
-        toast.push('Broker account updated', 'success');
+        const res = await api.updateBrokerAccount(id, payload);
+        toast.push(res?.message || 'Broker account updated', res?.data?.isConnected ? 'success' : 'info');
       } else {
         const payload = {
           userId: user?.id,
@@ -111,10 +114,12 @@ export default function BrokerAccountForm() {
         if (form.refreshToken) payload.credentials.refreshToken = form.refreshToken;
         if (form.password) payload.credentials.password = form.password;
         if (form.totpSecret) payload.credentials.totpSecret = form.totpSecret;
+        if (form.mobileNumber) payload.credentials.mobileNumber = form.mobileNumber;
         if (form.tokenExpiresAt) payload.credentials.tokenExpiresAt = form.tokenExpiresAt;
-        await api.createBrokerAccount(payload);
-        toast.push('Broker account created successfully', 'success');
+        const res = await api.createBrokerAccount(payload);
+        toast.push(res?.message || 'Broker account created successfully', 'success');
       }
+      refreshBrokerStatus?.();
       navigate('/app/broker-accounts');
     } catch (err) {
       setError(err.message || 'Operation failed');
@@ -212,12 +217,34 @@ export default function BrokerAccountForm() {
             </div>
           )}
 
+          {form.broker === 'KOTAK_NEO' && (
+            <div style={{
+              background: 'rgba(225, 29, 72, 0.08)',
+              border: '1px solid rgba(225, 29, 72, 0.25)',
+              borderRadius: 8,
+              padding: '12px 16px',
+              marginBottom: 16,
+              fontSize: '0.875rem',
+              color: '#e11d48'
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Kotak Neo Trade API Setup Guide:</div>
+              <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5, color: 'inherit' }}>
+                <li><strong>API Access Token:</strong> In Neo App or Web portal, navigate to <em>More → TradeAPI → API Dashboard</em>, click <em>Create Application</em> and copy the token.</li>
+                <li><strong>TOTP Registration:</strong> In API Dashboard on the top right, click <em>TOTP Registration</em>, scan the QR code with Google Authenticator, and copy the alphanumeric setup key.</li>
+                <li><strong>UCC & MPIN:</strong> Your 5-digit Client Code from Profile, and your 6-digit Trading MPIN.</li>
+                <li><strong>Automatic 2-Step Login:</strong> TradeGuard will automatically compute your 6-digit TOTP, validate your MPIN, and maintain your active trading session!</li>
+              </ul>
+            </div>
+          )}
+
           <div className="form-group">
             <label className="form-label">
               {form.broker === 'DHAN' 
                 ? 'Dhan Client ID (e.g. 1000000001) *' 
                 : form.broker === 'ANGEL_ONE'
                 ? 'Angel One Client ID (e.g. A123456) *'
+                : form.broker === 'KOTAK_NEO'
+                ? 'Kotak Neo UCC / Client Code (e.g. AB123) *'
                 : 'Client ID *'}
             </label>
             <input
@@ -227,6 +254,8 @@ export default function BrokerAccountForm() {
                   ? 'e.g. 1000000001 (found in Dhan profile)' 
                   : form.broker === 'ANGEL_ONE'
                   ? 'e.g. A123456 (your Angel One Client ID)'
+                  : form.broker === 'KOTAK_NEO'
+                  ? 'e.g. AB123 (your 5-digit Kotak Neo UCC)'
                   : 'e.g. Upstox UCC or Client ID'
               }
               value={form.clientId}
@@ -259,7 +288,62 @@ export default function BrokerAccountForm() {
             </>
           )}
 
-          {form.broker !== 'ANGEL_ONE' && (
+          {form.broker === 'KOTAK_NEO' && (
+            <>
+              <div style={{
+                padding: '12px 14px',
+                marginBottom: '16px',
+                borderRadius: '8px',
+                background: 'rgba(59, 130, 246, 0.08)',
+                border: '1px solid rgba(59, 130, 246, 0.25)',
+                fontSize: '12.5px',
+                lineHeight: 1.5,
+                color: 'var(--text-secondary, #94a3b8)'
+              }}>
+                <div style={{ fontWeight: 600, color: 'var(--primary, #3b82f6)', marginBottom: '4px' }}>
+                  ℹ️ Kotak Neo Connection Instructions
+                </div>
+                <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                  <li><strong>Client Code (UCC)</strong>: Your 5-character Kotak UCC (e.g. W0WLI).</li>
+                  <li><strong>Neo API Access Token</strong>: Copied from your Kotak Neo Trade API Dashboard.</li>
+                  <li><strong>TOTP Secret Key</strong>: The setup key from Kotak Neo TradeAPI TOTP Registration. <em>Note: If you click TOTP Registration again in Kotak's portal, it invalidates the previous key.</em></li>
+                  <li><strong>Session Token (Optional)</strong>: If your TOTP secret is out of sync, you can paste an active Trading Token directly.</li>
+                </ul>
+              </div>
+              <SecretField 
+                name="apiKey" 
+                label="Neo API Access Token (from API Dashboard) *" 
+                placeholder="Paste API token from TradeAPI Dashboard (e.g. ec6a746c-...)" 
+              />
+              <div className="form-group">
+                <label className="form-label">Registered Mobile Number *</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="e.g. +919876543210 or 10-digit mobile"
+                  value={form.mobileNumber}
+                  onChange={(e) => update('mobileNumber', e.target.value)}
+                />
+              </div>
+              <SecretField 
+                name="password" 
+                label="6-Digit Trading MPIN *" 
+                placeholder="Your 6-digit MPIN used for trading in Neo app" 
+              />
+              <SecretField 
+                name="totpSecret" 
+                label="TOTP Secret Key (from QR Setup) OR Current 6-digit Authenticator Code *" 
+                placeholder="Enter Base32 Secret Key for 24/7 auto-login OR enter your current 6-digit TOTP code" 
+              />
+              <SecretField 
+                name="accessToken" 
+                label="Trading Session Token (Optional - generated automatically via MPIN & TOTP)" 
+                placeholder="Optional manual Trading Token (starts with eyJ...)" 
+              />
+            </>
+          )}
+
+          {form.broker !== 'ANGEL_ONE' && form.broker !== 'KOTAK_NEO' && (
             <SecretField 
               name="accessToken" 
               label={

@@ -18,7 +18,7 @@
  * - Live Risk / Reward Ratios
  */
 
-import brokerConfig from "../brokers/brokerConfig.js";
+import brokerConfig, { calculateBrokerageForLeg } from "../brokers/brokerConfig.js";
 
 function round2(val) {
     return Math.round((Number(val || 0) + Number.EPSILON) * 100) / 100;
@@ -111,29 +111,26 @@ export class PnLEngine {
         const isCommodity = String(segment).toUpperCase().includes("COMM") ||
                             String(segment).toUpperCase().includes("MCX");
 
-        // 1. BROKERAGE (Upstox: ₹20 or 0.05% whichever is lower for intraday/fno; flat ₹20 for delivery/options)
-        let buyBrokerage = 0;
-        let sellBrokerage = 0;
+        // 1. BROKERAGE (Audited brokerConfig logic)
+        const pType = isDelivery ? "DELIVERY" : (isOptions ? "OPTIONS" : (isFutures ? "FUTURES" : (isCommodity ? "COMMODITY" : "INTRADAY")));
+        const buyBrokerageRes = calculateBrokerageForLeg({
+            broker,
+            productType: pType,
+            turnover: buyTurnover
+        });
+        const sellBrokerageRes = calculateBrokerageForLeg({
+            broker,
+            productType: pType,
+            turnover: sellTurnover
+        });
+        const brokerage = buyBrokerageRes.brokerage + sellBrokerageRes.brokerage;
 
-        if (isOptions) {
-            buyBrokerage = 20;
-            sellBrokerage = 20;
-        } else if (isDelivery) {
-            buyBrokerage = Math.min(20, buyTurnover * 0.025);
-            sellBrokerage = Math.min(20, sellTurnover * 0.025);
-        } else {
-            // Intraday & Futures
-            buyBrokerage = Math.min(20, buyTurnover * 0.0005);
-            sellBrokerage = Math.min(20, sellTurnover * 0.0005);
-        }
-        const brokerage = buyBrokerage + sellBrokerage;
-
-        // 2. STT (Securities Transaction Tax)
+        // 2. STT (Securities Transaction Tax - post Finance Act 2024)
         let stt = 0;
         if (isDelivery) {
             stt = (buyTurnover * 0.001) + (sellTurnover * 0.001); // 0.1% both sides
         } else if (isOptions) {
-            stt = sellTurnover * 0.00125; // 0.125% on sell premium
+            stt = sellTurnover * 0.001; // 0.1% on sell premium
         } else if (isFutures) {
             stt = sellTurnover * 0.0002; // 0.02% on sell turnover
         } else {
@@ -142,10 +139,10 @@ export class PnLEngine {
         }
 
         // 3. EXCHANGE TRANSACTION CHARGES
-        let exchangeRate = 0.000030699; // NSE Equity ~ 0.0030699%
-        if (isOptions) exchangeRate = 0.000355299;
-        else if (isFutures) exchangeRate = 0.000018299;
-        const exchangeCharges = totalTurnover * exchangeRate;
+        let exchangeRate = 0.0000297; // NSE Equity ~ 0.00297%
+        if (isOptions) exchangeRate = 0.0003503; // Options ~ 0.03503% on premium
+        else if (isFutures) exchangeRate = 0.0000173; // Futures ~ 0.00173%
+        const exchangeCharges = (isOptions ? (buyTurnover + sellTurnover) : totalTurnover) * exchangeRate;
 
         // 4. CTT (Commodities Transaction Tax)
         let ctt = 0;
@@ -160,11 +157,16 @@ export class PnLEngine {
         let stampDutyRate = 0.00003; // Intraday: 0.003%
         if (isDelivery) stampDutyRate = 0.00015; // Delivery: 0.015%
         else if (isFutures) stampDutyRate = 0.00002; // Futures: 0.002%
-        else if (isOptions) stampDutyRate = 0.00003; // Options: 0.003%
+        else if (isOptions) stampDutyRate = 0.00003; // Options: 0.003% on premium
         const stampDuty = buyTurnover * stampDutyRate;
 
         // 7. DP CHARGES (Depository Participant fee on delivery sell transactions)
-        const dpCharges = isDelivery ? 20.00 : 0.00;
+        let dpCharges = 0;
+        if (isDelivery) {
+            if (String(broker).toUpperCase().includes("DHAN")) dpCharges = 12.50;
+            else if (String(broker).toUpperCase().includes("KOTAK")) dpCharges = 15.00;
+            else dpCharges = 20.00;
+        }
 
         // 8. GST (18% on Brokerage + Exchange Charges + SEBI Charges)
         const gstBase = brokerage + exchangeCharges + sebiCharges;
@@ -212,23 +214,22 @@ export class PnLEngine {
         const isCommodity = String(segment).toUpperCase().includes("COMM") ||
                             String(segment).toUpperCase().includes("MCX");
 
-        // 1. Brokerage
-        let brokerage = 0;
-        if (isOptions) {
-            brokerage = 20;
-        } else if (isDelivery) {
-            brokerage = Math.min(20, turnover * 0.025);
-        } else {
-            brokerage = Math.min(20, turnover * 0.0005);
-        }
+        // 1. Brokerage (Audited brokerConfig logic)
+        const pType = isDelivery ? "DELIVERY" : (isOptions ? "OPTIONS" : (isFutures ? "FUTURES" : (isCommodity ? "COMMODITY" : "INTRADAY")));
+        const bRes = calculateBrokerageForLeg({
+            broker,
+            productType: pType,
+            turnover
+        });
+        const brokerage = bRes.brokerage;
 
-        // 2. STT (Securities Transaction Tax)
+        // 2. STT (Securities Transaction Tax - post Finance Act 2024)
         let stt = 0;
         if (isDelivery) {
             stt = turnover * 0.001; // 0.1% on delivery buy & sell
         } else if (!isBuy) {
             if (isOptions) {
-                stt = turnover * 0.00125; // 0.125% on sell premium
+                stt = turnover * 0.001; // 0.1% on sell premium
             } else if (isFutures) {
                 stt = turnover * 0.0002; // 0.02% on sell turnover
             } else {
@@ -237,9 +238,9 @@ export class PnLEngine {
         }
 
         // 3. Exchange Transaction Charges
-        let exchangeRate = 0.000030699;
-        if (isOptions) exchangeRate = 0.000355299;
-        else if (isFutures) exchangeRate = 0.000018299;
+        let exchangeRate = 0.0000297;
+        if (isOptions) exchangeRate = 0.0003503;
+        else if (isFutures) exchangeRate = 0.0000173;
         const exchangeCharges = turnover * exchangeRate;
 
         // 4. CTT (Commodities Transaction Tax)
@@ -261,8 +262,13 @@ export class PnLEngine {
             stampDuty = turnover * stampRate;
         }
 
-        // 7. DP Charges (₹20 on delivery sell)
-        const dpCharges = (!isBuy && isDelivery) ? 20.00 : 0.00;
+        // 7. DP Charges on delivery sell
+        let dpCharges = 0;
+        if (!isBuy && isDelivery) {
+            if (String(broker).toUpperCase().includes("DHAN")) dpCharges = 12.50;
+            else if (String(broker).toUpperCase().includes("KOTAK")) dpCharges = 15.00;
+            else dpCharges = 20.00;
+        }
 
         // 8. GST (18% on Brokerage + Exchange Charges + SEBI Charges)
         const gstBase = brokerage + exchangeCharges + sebiCharges;

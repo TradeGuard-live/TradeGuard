@@ -43,8 +43,8 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
-  const login = useCallback(async (email, password) => {
-    const data = await api.login(email, password);
+  const login = useCallback(async (identifier, password) => {
+    const data = await api.login(identifier, password);
     localStorage.setItem('tg_token', data.token);
     const normalizedUser = {
       id: data.user._id || data.user.id,

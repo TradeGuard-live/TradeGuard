@@ -13,9 +13,24 @@
 const EPSILON = 0.00000001;
 
 function normalizeSide(side) {
-    const s = String(side || "").toUpperCase();
+    const s = String(side || "").toUpperCase().trim();
     if (s === "BUY" || s === "B") return "BUY";
     if (s === "SELL" || s === "S") return "SELL";
+    return s;
+}
+
+function normalizeProduct(prod = "") {
+    const p = String(prod || "").toUpperCase().trim();
+    if (p === "MIS" || p === "INTRADAY" || p === "BO" || p === "CO") return "INTRADAY";
+    if (p === "CNC" || p === "DELIVERY") return "DELIVERY";
+    if (p === "NRML" || p === "CARRYFORWARD" || p === "MARGIN" || p === "MTF") return "CARRYFORWARD";
+    return p || "INTRADAY";
+}
+
+function normalizeSymbol(symbol = "") {
+    let s = String(symbol || "").toUpperCase().trim();
+    // Strip common broker exchange series suffixes (-EQ, .NSE, .BSE, -BE, -BL)
+    s = s.replace(/(-EQ|\.NSE|\.BSE|-BE|-BL)$/i, "");
     return s;
 }
 
@@ -34,8 +49,8 @@ function getTradeKey(trade) {
     const brokerAccountId = String(trade.brokerAccountId || "");
     const exchange = String(trade.exchange || "NSE").toUpperCase();
     const segment = String(trade.segment || "EQUITY").toUpperCase();
-    const symbol = String(trade.symbol || trade.trading_symbol || trade.scrip_name || "").toUpperCase();
-    const productType = String(trade.productType || trade.productCode || trade.product || "INTRADAY").toUpperCase();
+    const symbol = normalizeSymbol(trade.symbol || trade.trading_symbol || trade.scrip_name || "");
+    const productType = normalizeProduct(trade.productType || trade.productCode || trade.product);
     return `${brokerAccountId}|${exchange}|${segment}|${symbol}|${productType}`;
 }
 
@@ -194,6 +209,37 @@ export class PositionEngine {
                 position.status = "OPEN";
                 position.side = position.netQuantity > 0 ? "BUY" : "SELL";
             }
+
+            // Enhanced Position Metrics
+            const totalBuyQty = position.totalBuyQuantity;
+            const totalSellQty = position.totalSellQuantity;
+            position.avgBuyPrice = totalBuyQty > 0 ? Math.round((position.totalBuyValue / totalBuyQty) * 100) / 100 : 0;
+            position.avgSellPrice = totalSellQty > 0 ? Math.round((position.totalSellValue / totalSellQty) * 100) / 100 : 0;
+            position.totalTurnover = Math.round((position.totalBuyValue + position.totalSellValue) * 100) / 100;
+            position.openValue = Math.round(position.openQuantity * position.averagePrice * 100) / 100;
+
+            // Breakeven price calculation (including ~0.15% roundtrip tax & charges estimate)
+            if (position.openQuantity > EPSILON && position.averagePrice > 0) {
+                const chargeBuffer = 0.0015;
+                if (position.netQuantity > 0) {
+                    position.breakEvenPrice = Math.round(position.averagePrice * (1 + chargeBuffer) * 100) / 100;
+                } else {
+                    position.breakEvenPrice = Math.round(position.averagePrice * (1 - chargeBuffer) * 100) / 100;
+                }
+            } else {
+                position.breakEvenPrice = 0;
+            }
+
+            // Win/Loss statistics on squared round-trip lots
+            const winLots = position.squaredLots.filter(l => l.realizedPnL > 0);
+            const lossLots = position.squaredLots.filter(l => l.realizedPnL < 0);
+            position.winTradesCount = winLots.length;
+            position.lossTradesCount = lossLots.length;
+            position.totalSquaredTrades = position.squaredLots.length;
+            position.winRate = position.squaredLots.length > 0
+                ? Math.round((winLots.length / position.squaredLots.length) * 100)
+                : 0;
+            position.realizedPnL = Math.round((position.realizedPnL + Number.EPSILON) * 100) / 100;
         }
 
         return Array.from(positionsMap.values());
@@ -220,9 +266,9 @@ export class PositionEngine {
     }
 
     /**
-     * Reconciles matched trade positions with Upstox /portfolio/short-term-positions if present.
+     * Reconciles matched trade positions with Upstox / Angel One / Dhan / Kotak Neo positions.
      * @param {Array} computedPositions 
-     * @param {Array} brokerPositions (from Upstox API)
+     * @param {Array} brokerPositions (from broker API)
      * @returns {Array} reconciledPositions
      */
     reconcileWithBrokerPositions(computedPositions, brokerPositions = []) {
@@ -232,11 +278,15 @@ export class PositionEngine {
 
         const reconciled = [...computedPositions];
         const computedMap = new Map();
-        reconciled.forEach(p => computedMap.set(p.symbol, p));
+        reconciled.forEach(p => {
+            computedMap.set(p.symbol, p);
+            computedMap.set(normalizeSymbol(p.symbol), p);
+        });
 
         for (const bp of brokerPositions) {
-            const sym = String(bp.trading_symbol || bp.symbol || "").toUpperCase();
-            const existing = computedMap.get(sym);
+            const rawSym = String(bp.trading_symbol || bp.tradingsymbol || bp.symbol || bp.trdSym || "").toUpperCase();
+            const cleanSym = normalizeSymbol(rawSym);
+            const existing = computedMap.get(cleanSym) || computedMap.get(rawSym);
 
             if (existing) {
                 // Enrich with exact broker instrument token & live price

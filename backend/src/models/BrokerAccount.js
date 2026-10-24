@@ -11,7 +11,7 @@ const brokerAccountSchema = new mongoose.Schema(
 
         broker: {
             type: String,
-            enum: ["UPSTOX", "ANGEL_ONE", "DHAN"],
+            enum: ["UPSTOX", "ANGEL_ONE", "DHAN", "KOTAK_NEO"],
             required: true
         },
 
@@ -28,6 +28,9 @@ const brokerAccountSchema = new mongoose.Schema(
             password: String,
             totpSecret: String,
             feedToken: String,
+            mobileNumber: String,
+            sid: String,
+            baseUrl: String,
 
             tokenExpiresAt: Date
         },
@@ -79,6 +82,14 @@ brokerAccountSchema.pre("save", function () {
 
     if (this.isModified("credentials.feedToken") && this.credentials.feedToken) {
         this.credentials.feedToken = encrypt(this.credentials.feedToken);
+    }
+
+    if (this.isModified("credentials.mobileNumber") && this.credentials.mobileNumber) {
+        this.credentials.mobileNumber = encrypt(this.credentials.mobileNumber);
+    }
+
+    if (this.isModified("credentials.sid") && this.credentials.sid) {
+        this.credentials.sid = encrypt(this.credentials.sid);
     }
 
 });

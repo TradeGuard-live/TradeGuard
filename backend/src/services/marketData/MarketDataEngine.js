@@ -10,6 +10,31 @@
 import UpstoxClient from "upstox-js-sdk";
 import dhanMarketData from "../../brokers/dhan/DhanMarketDataService.js";
 import angelOneMarketData from "../../brokers/angelOne/AngelOneMarketDataService.js";
+import kotakNeoMarketData from "../../brokers/kotakNeo/KotakNeoMarketDataService.js";
+
+/**
+ * Checks if the Indian Cash & F&O market (NSE/BSE) is currently open.
+ * Trading hours: Monday to Friday, 9:15 AM to 3:30 PM IST (UTC+5:30).
+ */
+export function isIndianMarketOpen() {
+    const now = new Date();
+    // Convert to IST (UTC+5:30)
+    const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const istTime = new Date(utcTime + (3600000 * 5.5));
+
+    const day = istTime.getDay(); // 0 is Sunday, 6 is Saturday
+    if (day === 0 || day === 6) {
+        return false;
+    }
+
+    const hours = istTime.getHours();
+    const minutes = istTime.getMinutes();
+    const currentMinuteOfDay = hours * 60 + minutes;
+
+    // 9:15 AM is 9 * 60 + 15 = 555
+    // 3:30 PM is 15 * 60 + 30 = 930
+    return currentMinuteOfDay >= 555 && currentMinuteOfDay <= 930;
+}
 
 export class MarketDataEngine {
     constructor() {
@@ -80,6 +105,10 @@ export class MarketDataEngine {
         const dhanClientId = typeof brokerAuth === "object" ? brokerAuth?.dhanClientId : null;
         const angelToken = typeof brokerAuth === "object" ? brokerAuth?.angelToken : null;
         const angelApiKey = typeof brokerAuth === "object" ? brokerAuth?.angelApiKey : null;
+        const kotakToken = typeof brokerAuth === "object" ? brokerAuth?.kotakToken : null;
+        const kotakApiKey = typeof brokerAuth === "object" ? brokerAuth?.kotakApiKey : null;
+        const kotakSid = typeof brokerAuth === "object" ? brokerAuth?.kotakSid : null;
+        const kotakBaseUrl = typeof brokerAuth === "object" ? brokerAuth?.kotakBaseUrl : null;
 
         let liveBrokerConnected = false;
 
@@ -198,25 +227,82 @@ export class MarketDataEngine {
             }
         }
 
-        // 5. Fallback real-time price tick simulator for off-market hours/resilience
+        // 5. Try connecting to Kotak Neo Market Data Service if token is available
+        if (kotakApiKey || kotakToken) {
+            try {
+                await kotakNeoMarketData.start(
+                    uId,
+                    kotakApiKey,
+                    kotakToken,
+                    positions.map(p => ({
+                        symbol: p.symbol,
+                        tradingsymbol: p.symbol,
+                        instrumentToken: p.instrumentToken,
+                        exchangeSegment: p.exchange === "BSE" ? "bse_cm" : (p.segment === "FUTURES" || p.segment === "OPTIONS" ? "nse_fo" : "nse_cm")
+                    })),
+                    (tick) => {
+                        liveBrokerConnected = true;
+                        if (this.simulators.has(uId)) {
+                            clearInterval(this.simulators.get(uId));
+                            this.simulators.delete(uId);
+                        }
+                        if (tick?.instrumentKey && tick?.ltp) {
+                            this.notify(uId, tick.instrumentKey, tick.ltp);
+                        }
+                        if (tick?.symbol && tick?.ltp) {
+                            this.notify(uId, tick.symbol, tick.ltp);
+                        }
+                    },
+                    { sid: kotakSid, baseUrl: kotakBaseUrl }
+                );
+                console.log(`[MarketDataEngine] Initialized Kotak Neo Market Data stream for user ${uId}`);
+            } catch (kErr) {
+                console.warn("[MarketDataEngine] Kotak Neo market data notice:", kErr.message);
+            }
+        }
+
+        // 6. Fallback real-time price tick simulator for off-market hours/resilience
         if (!liveBrokerConnected) {
             this.ensureFallbackSimulator(uId, positions);
         }
     }
 
     /**
-     * Fallback real-time price streamer for off-hours / demo / testing.
-     * Produces realistic subtle market ticks so WebSocket and React UI are always responsive.
+     * Fallback real-time price streamer for testing and resilience.
+     * When market is CLOSED (outside Mon-Fri 09:15-15:30 IST), NO random price ticks are emitted.
+     * Prices remain completely steady at the last known closing / traded price.
      */
     ensureFallbackSimulator(userId, positions) {
         if (this.simulators.has(userId)) return;
 
+        // Broadcast steady closing prices once
+        for (const pos of positions) {
+            const key = pos.instrumentToken || pos.symbol;
+            const currentLtp = this.latestLtp.get(key) || pos.lastBrokerPrice || pos.averagePrice || 100;
+            this.notify(userId, key, currentLtp);
+            this.notify(userId, pos.symbol, currentLtp);
+        }
+
+        // If market is closed, DO NOT simulate price fluctuations
+        if (!isIndianMarketOpen()) {
+            console.log(`[MarketDataEngine] Indian market is closed. Holding steady closing LTP for user ${userId}.`);
+            return;
+        }
+
         const interval = setInterval(() => {
+            // Check if market has closed during execution
+            if (!isIndianMarketOpen()) {
+                console.log(`[MarketDataEngine] Market hours ended (3:30 PM IST). Freezing live ticks for user ${userId}.`);
+                clearInterval(interval);
+                this.simulators.delete(userId);
+                return;
+            }
+
             for (const pos of positions) {
                 const key = pos.instrumentToken || pos.symbol;
-                const currentLtp = this.latestLtp.get(key) || pos.averagePrice || 100;
+                const currentLtp = this.latestLtp.get(key) || pos.lastBrokerPrice || pos.averagePrice || 100;
 
-                // Micro fluctuations: ±0.05% with a subtle mean-reverting drift
+                // Micro fluctuations during market hours: ±0.05% with a subtle mean-reverting drift
                 const basePrice = pos.averagePrice || currentLtp;
                 const drift = (basePrice - currentLtp) * 0.02; // slight pull towards average
                 const randomPct = (Math.random() - 0.495) * 0.003; // ~0.3% max swing
@@ -254,6 +340,12 @@ export class MarketDataEngine {
 
         try {
             angelOneMarketData.stop(uId);
+        } catch (e) {
+            // ignore
+        }
+
+        try {
+            kotakNeoMarketData.stop(uId);
         } catch (e) {
             // ignore
         }

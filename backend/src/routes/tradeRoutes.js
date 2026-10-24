@@ -10,11 +10,13 @@ import {
   getInstrumentDistribution,
   getLiveTradingSummary,
   getChargesAnalytics,
-  createTrade
+  createTrade,
+  deleteTrade
 } from "../controllers/tradeController.js";
 const router = express.Router();
 router.get("/", listTrades);
 router.post("/", createTrade);
+router.delete("/:id", deleteTrade);
 router.get("/summary", getTradeSummary);
 router.get("/live-summary", getLiveTradingSummary);
 router.get("/charges-analytics", getChargesAnalytics);

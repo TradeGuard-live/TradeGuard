@@ -634,6 +634,19 @@ Contains static config for each broker:
 ### Dhan Integration
 - DhanHQ: `backend/src/brokers/dhan/` (DhanAdapter, Mapper, SyncService, MarketDataService)
 
+### Kotak Neo Integration
+
+**Files:**
+- `backend/src/brokers/kotakNeo/KotakNeoAdapter.js` — Comprehensive REST client for Kotak Neo Trading APIs (2-step login with TOTP + MPIN, orders, tradebook, positions, holdings, limits, batch quotes)
+- `backend/src/brokers/kotakNeo/KotakNeoMapper.js` — Maps Kotak Neo segments (`nse_cm`, `bse_cm`, `nse_fo`), products (`CNC`, `MIS`, `NRML`), and response bodies into TradeGuard schema
+- `backend/src/brokers/kotakNeo/KotakNeoSyncService.js` — Syncs today's and historical trades into TradeRecord collection, calculating statutory & brokerage charges
+- `backend/src/brokers/kotakNeo/KotakNeoMarketDataService.js` — Real-time batch quotes polling streamer via `/script-details/1.0/quotes/neosymbol/<queries>/ltp`
+
+**Authentication & 2-Step Login Mechanism:**
+- **Step 2a:** `POST https://mis.kotaksecurities.com/login/1.0/tradeApiLogin` with `mobileNumber`, `ucc` (Client Code), and 6-digit `totp`. Header: `Authorization: <API_ACCESS_TOKEN>`, `neo-fin-key: neotradeapi`. Returns `VIEW_TOKEN` and `VIEW_SID`.
+- **Step 2b:** `POST https://mis.kotaksecurities.com/login/1.0/tradeApiValidate` with `mpin` (6-digit trading MPIN). Returns `TRADING_TOKEN`, `TRADING_SID`, and dynamic `baseUrl` (e.g. `https://cis.kotaksecurities.com`).
+- TradeGuard uses the user's `totpSecret` (from the TOTP Registration setup screen) to dynamically generate the 6-digit TOTP code, execute Step 2a & 2b, and store the trading credentials with AES encryption.
+
 ---
 
 ## 11. Utility Modules
