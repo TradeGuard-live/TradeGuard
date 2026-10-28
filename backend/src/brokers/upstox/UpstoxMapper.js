@@ -187,6 +187,10 @@ const mapUpstoxTrade = (trade) => {
             trade.scrip_name ||
             null,
 
+        // ✅ Preserve canonical exchange and instrument token for accurate quote mapping
+        exchange: String(trade.exchange || "NSE").toUpperCase(),
+        instrumentToken: trade.instrument_token || trade.instrumentToken || trade.instrument_key || null,
+
         transactionType,
 
         quantity: Number(trade.quantity || 0),
@@ -216,6 +220,38 @@ const mapUpstoxTrade = (trade) => {
         // Preserve the original broker payload for debugging
         // and future field mapping.
         brokerResponse: trade,
+    };
+};
+
+// ======================================================
+// MAP POSITION (Upstox /portfolio/short-term-positions)
+// ======================================================
+const mapUpstoxPosition = (pos) => {
+    if (!pos) return null;
+
+    const symbol = pos.trading_symbol || pos.tradingsymbol || pos.symbol || null;
+    const exchange = String(pos.exchange || "NSE").toUpperCase();
+    const segment = mapUpstoxInstrumentSegment(pos) || (pos.segment ? mapUpstoxSegment(pos.segment) : "EQUITY");
+    const productType = mapUpstoxProduct(pos.product) || "INTRADAY";
+    const instrumentToken = pos.instrument_token || `${exchange}_EQ|${symbol}`;
+    const qty = Number(pos.quantity || 0);
+
+    return {
+        // ✅ Normalized Upstox position representation
+        symbol,
+        exchange,
+        segment,
+        productType,
+        instrumentToken,
+        quantity: qty,
+        netQuantity: qty,
+        averagePrice: Number(pos.average_price || pos.buy_price || 0),
+        lastPrice: Number(pos.last_price || 0),
+        closePrice: Number(pos.close_price || 0),
+        realizedPnL: Number(pos.realised || 0),
+        unrealizedPnL: Number(pos.unrealised || 0),
+        pnl: Number(pos.pnl || 0),
+        brokerResponse: pos
     };
 };
 
@@ -302,6 +338,7 @@ const mapUpstoxOrderStatus = (status) => {
 
 export {
     mapUpstoxTrade,
+    mapUpstoxPosition,
     mapUpstoxOrder,
     mapUpstoxOrderStatus,
     mapUpstoxSegment,

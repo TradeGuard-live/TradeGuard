@@ -1,4 +1,5 @@
 import express from "express";
+import { authenticate } from "../middleware/auth.js";
 import {
   listTrades,
   getTradeSummary,
@@ -13,17 +14,21 @@ import {
   createTrade,
   deleteTrade
 } from "../controllers/tradeController.js";
+
 const router = express.Router();
-router.get("/", listTrades);
-router.post("/", createTrade);
-router.delete("/:id", deleteTrade);
-router.get("/summary", getTradeSummary);
-router.get("/live-summary", getLiveTradingSummary);
-router.get("/charges-analytics", getChargesAnalytics);
-router.get("/analytics", getAnalytics);
-router.get("/reports", getReportData);
-router.get("/risk/exposures", getRiskExposures);
-router.get("/brokers/comparison", getBrokerComparison);
+
+// ✅ Enforce JWT authentication on all trade and portfolio endpoints
+router.get("/", authenticate, listTrades);
+router.post("/", authenticate, createTrade);
+router.delete("/:id", authenticate, deleteTrade);
+router.get("/summary", authenticate, getTradeSummary);
+router.get("/live-summary", authenticate, getLiveTradingSummary);
+router.get("/charges-analytics", authenticate, getChargesAnalytics);
+router.get("/analytics", authenticate, getAnalytics);
+router.get("/reports", authenticate, getReportData);
+router.get("/risk/exposures", authenticate, getRiskExposures);
+router.get("/brokers/comparison", authenticate, getBrokerComparison);
 router.post("/calculations/charges", calculateTradeCharges);
-router.get("/instrument-distribution", getInstrumentDistribution);
+router.get("/instrument-distribution", authenticate, getInstrumentDistribution);
+
 export default router;

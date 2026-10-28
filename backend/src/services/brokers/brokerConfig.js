@@ -786,6 +786,207 @@ const brokerConfig = {
                     ]
                 }
             }
+        },
+
+        // ✅ GROWW (Official Groww Trade API & Pricing audited: https://groww.in/pricing)
+        GROWW: {
+            id: "GROWW",
+            name: "Groww",
+            defaultPlan: "STANDARD",
+            accountOpening: {
+                fee: 0,
+                display: "₹0 (Free)",
+                details: "100% Free online paperless Demat & Trading account opening."
+            },
+            amc: {
+                firstYearWaiver: true,
+                firstYearFee: 0,
+                subsequentFee: 0,
+                billingFrequency: "LIFETIME_FREE",
+                display: "₹0 (Lifetime Free)",
+                bsdaEligible: true,
+                details: "100% Zero AMC for Life for all individual accounts unconditionally."
+            },
+            plans: {
+                STANDARD: {
+                    name: "Standard",
+                    brokerage: {
+                        equityDelivery: {
+                            type: "LOWER_OF",
+                            flat: 20,
+                            percentage: 0.05, // 0.05%
+                            basis: "TURNOVER",
+                            display: "Lower of ₹20 or 0.05% of order turnover"
+                        },
+                        equityIntraday: {
+                            type: "LOWER_OF",
+                            flat: 20,
+                            percentage: 0.05, // 0.05%
+                            basis: "TURNOVER",
+                            display: "Lower of ₹20 or 0.05% of order turnover"
+                        },
+                        equityFutures: {
+                            type: "FLAT",
+                            amount: 20, // Flat ₹20 per executed order
+                            basis: "PER_ORDER",
+                            display: "Fixed ₹20 per executed order"
+                        },
+                        equityOptions: {
+                            type: "FLAT",
+                            amount: 20, // Flat ₹20 per executed order
+                            basis: "PER_ORDER",
+                            display: "Fixed ₹20 per executed order"
+                        }
+                    },
+                    dpCharges: {
+                        sell: 13.50,
+                        gstApplicable: true,
+                        unit: "PER_ISIN",
+                        display: "₹13.50 + 18% GST per scrip (₹15.93 total)"
+                    },
+                    otherCharges: {
+                        autoSquareOff: 50,
+                        callAndTrade: 50,
+                        apiSubscription: 0
+                    }
+                }
+            },
+            displayValues: {
+                delivery: "Lower of ₹20 or 0.05%",
+                intraday: "Lower of ₹20 or 0.05%",
+                futures: "Fixed ₹20/order",
+                options: "Fixed ₹20/order",
+                commodities: "Not supported",
+                currency: "Not supported",
+                amc: "₹0 (Lifetime Free)",
+                accountOpening: "₹0 (Free)",
+                dpCharges: "₹13.50 + GST (₹15.93)",
+                autoSquareOff: "₹50 + GST",
+                callAndTrade: "₹50 + GST per order",
+                apiCharges: "Groww Trade API Subscription"
+            },
+            segments: "Equity, F&O (NSE & BSE)",
+            highlights: [
+                "Zero Account Opening Fee & Lifetime Free AMC",
+                "Equity Delivery: Lower of ₹20 or 0.05% per executed order",
+                "Equity Intraday: Lower of ₹20 or 0.05% per executed order",
+                "F&O Trading: Flat ₹20 per executed order",
+                "Low DP Charges: ₹13.50 + GST per scrip per day on delivery sell"
+            ]
+        },
+
+        // ✅ ZERODHA (Official Zerodha Kite Connect v3 & Pricing audited: https://zerodha.com/pricing/)
+        ZERODHA: {
+            id: "ZERODHA",
+            name: "Zerodha",
+            defaultPlan: "STANDARD",
+            accountOpening: {
+                fee: 200,
+                display: "₹200 (₹300 with Commodity)",
+                details: "₹200 for online Trading and Demat account opening (Equity, F&O, Currency); ₹100 extra for Commodity segment."
+            },
+            amc: {
+                firstYearWaiver: false,
+                firstYearFee: 300,
+                subsequentFee: 300,
+                billingFrequency: "QUARTERLY",
+                display: "₹300/yr + GST (₹75/quarter)",
+                bsdaEligible: true,
+                bsdaConditions: "₹0 AMC if holding value < ₹4 Lakhs under SEBI BSDA norms.",
+                details: "₹300 + 18% GST per year billed quarterly at ₹75 + GST per quarter. BSDA accounts pay ₹0 AMC if holding value is under ₹4 Lakhs."
+            },
+            plans: {
+                STANDARD: {
+                    name: "Standard",
+                    brokerage: {
+                        equityDelivery: {
+                            type: "FLAT",
+                            amount: 0,
+                            basis: "PER_ORDER",
+                            display: "₹0 (Free Equity Delivery)"
+                        },
+                        equityIntraday: {
+                            type: "LOWER_OF",
+                            flat: 20,
+                            percentage: 0.03, // 0.03%
+                            basis: "TURNOVER",
+                            display: "Lower of ₹20 or 0.03% of order turnover"
+                        },
+                        equityFutures: {
+                            type: "LOWER_OF",
+                            flat: 20,
+                            percentage: 0.03, // 0.03%
+                            basis: "TURNOVER",
+                            display: "Lower of ₹20 or 0.03% of order turnover"
+                        },
+                        equityOptions: {
+                            type: "FLAT",
+                            amount: 20, // Flat ₹20 per executed order
+                            basis: "PER_ORDER",
+                            display: "Fixed ₹20 per executed order"
+                        },
+                        currencyFutures: {
+                            type: "LOWER_OF",
+                            flat: 20,
+                            percentage: 0.03,
+                            basis: "TURNOVER",
+                            display: "Lower of ₹20 or 0.03% of order turnover"
+                        },
+                        currencyOptions: {
+                            type: "FLAT",
+                            amount: 20,
+                            basis: "PER_ORDER",
+                            display: "Fixed ₹20 per executed order"
+                        },
+                        commodityFutures: {
+                            type: "LOWER_OF",
+                            flat: 20,
+                            percentage: 0.03,
+                            basis: "TURNOVER",
+                            display: "Lower of ₹20 or 0.03% of order turnover"
+                        },
+                        commodityOptions: {
+                            type: "FLAT",
+                            amount: 20,
+                            basis: "PER_ORDER",
+                            display: "Fixed ₹20 per executed order"
+                        }
+                    },
+                    dpCharges: {
+                        sell: 13.50,
+                        gstApplicable: true,
+                        unit: "PER_ISIN",
+                        display: "₹13.50 + 18% GST per scrip per day (₹15.93 total)"
+                    },
+                    otherCharges: {
+                        autoSquareOff: 50,
+                        callAndTrade: 50,
+                        apiSubscription: 2000
+                    }
+                }
+            },
+            displayValues: {
+                delivery: "₹0 (Free Delivery)",
+                intraday: "Lower of ₹20 or 0.03%",
+                futures: "Lower of ₹20 or 0.03%",
+                options: "Fixed ₹20/order",
+                commodities: "Lower of ₹20 or 0.03% (₹20 for options)",
+                currency: "Lower of ₹20 or 0.03% (₹20 for options)",
+                amc: "₹300/yr + GST (₹75/quarter)",
+                accountOpening: "₹200 (Online)",
+                dpCharges: "₹13.50 + GST (₹15.93)",
+                autoSquareOff: "₹50 + GST",
+                callAndTrade: "₹50 + GST per order",
+                apiCharges: "Kite Connect API: ₹2,000/month"
+            },
+            segments: "Equity, F&O, Commodity, Currency (NSE, BSE, MCX)",
+            highlights: [
+                "Zero Brokerage on Equity Delivery investments",
+                "Equity Intraday & Futures: Lower of ₹20 or 0.03% per executed order",
+                "Equity Options: Flat ₹20 per executed order",
+                "Commodity & Currency F&O: Flat ₹20 or 0.03%",
+                "Direct Kite Connect v3 API Integration"
+            ]
         }
     }
 };

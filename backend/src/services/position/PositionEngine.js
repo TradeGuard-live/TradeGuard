@@ -10,6 +10,8 @@
  * - Open Positions separation for Market Data & P&L Engine
  */
 
+import upstoxInstrumentService from "../marketData/upstoxInstrumentService.js";
+
 const EPSILON = 0.00000001;
 
 function normalizeSide(side) {
@@ -87,7 +89,11 @@ export class PositionEngine {
             const exchange = String(trade.exchange || "NSE").toUpperCase();
             const segment = String(trade.segment || "EQUITY").toUpperCase();
             const productType = String(trade.productType || trade.productCode || trade.product || "INTRADAY").toUpperCase();
-            const instrumentToken = trade.instrumentToken || trade.brokerResponse?.instrument_token || `${exchange}_EQ|${symbol}`;
+            // ✅ Resolve canonical instrument key using Upstox instrument service
+            const instrumentToken = trade.instrumentToken ||
+                                    trade.brokerResponse?.instrument_token ||
+                                    upstoxInstrumentService.resolveInstrumentKey({ symbol, exchange, segment }) ||
+                                    `${exchange}_EQ|${symbol}`;
 
             if (!positionsMap.has(key)) {
                 positionsMap.set(key, {
@@ -299,15 +305,18 @@ export class PositionEngine {
                 // Broker has a position that wasn't in trade records (e.g. carry-forward/pre-existing)
                 const qty = Number(bp.quantity || 0);
                 if (qty !== 0) {
+                    const sym = cleanSym || rawSym || "UNKNOWN";
                     const side = qty > 0 ? "BUY" : "SELL";
+                    const resolvedToken = bp.instrument_token || upstoxInstrumentService.resolveInstrumentKey({ symbol: sym, exchange: bp.exchange || "NSE" }) || `NSE_EQ|${sym}`;
                     reconciled.push({
-                        key: `BROKER|${bp.instrument_token || sym}`,
+                        // ✅ Resolved clean symbol and exact instrument key without ReferenceError
+                        key: `BROKER|${resolvedToken}`,
                         brokerAccountId: null,
                         symbol: sym,
                         exchange: bp.exchange || "NSE",
                         segment: bp.segment || "EQUITY",
                         productType: bp.product || "INTRADAY",
-                        instrumentToken: bp.instrument_token || `NSE_EQ|${sym}`,
+                        instrumentToken: resolvedToken,
                         totalBuyQuantity: qty > 0 ? Math.abs(qty) : 0,
                         totalSellQuantity: qty < 0 ? Math.abs(qty) : 0,
                         totalBuyValue: 0,

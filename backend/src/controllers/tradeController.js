@@ -6,7 +6,17 @@ import brokerConfig, { calculateBrokerageForLeg } from "../services/brokers/brok
 import positionEngine from "../services/position/PositionEngine.js";
 import pnlEngine from "../services/pnl/PnLEngine.js";
 
+// ✅ Derive verified user identity from JWT to prevent IDOR vulnerabilities
 const getUserId = (req, res) => {
+  if (req.user?.userId) {
+    const tokenUserId = String(req.user.userId);
+    const paramUserId = req.query.userId || req.params.userId;
+    if (paramUserId && String(paramUserId) !== tokenUserId) {
+      res.status(403).json({ success: false, message: "Forbidden: Access denied to other users' records" });
+      return null;
+    }
+    return tokenUserId;
+  }
   const userId = req.query.userId || req.params.userId;
   if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
     res.status(400).json({ success: false, message: "A valid MongoDB userId is required" });
@@ -728,6 +738,58 @@ export const getBrokerComparison = async (req, res) => {
       connection: connectedBrokers.has("ANGEL_ONE") ? "Connected" : "Not configured"
     });
 
+    // ✅ Groww (Audited official charges and connection state)
+    const groww = brokerConfig.brokers.GROWW;
+    if (groww) {
+      brokerList.push({
+        broker: "GROWW",
+        name: groww.name,
+        planName: "Standard",
+        accountOpening: groww.accountOpening.display,
+        accountOpeningDetails: groww.accountOpening.details,
+        amc: groww.amc,
+        delivery: groww.displayValues.delivery,
+        intraday: groww.displayValues.intraday,
+        futures: groww.displayValues.futures,
+        options: groww.displayValues.options,
+        commodities: groww.displayValues.commodities,
+        currency: groww.displayValues.currency,
+        dpCharges: groww.displayValues.dpCharges,
+        autoSquareOff: groww.displayValues.autoSquareOff,
+        callAndTrade: groww.displayValues.callAndTrade,
+        apiCharges: groww.displayValues.apiCharges,
+        segments: groww.segments,
+        highlights: groww.highlights,
+        connection: connectedBrokers.has("GROWW") ? "Connected" : "Not configured"
+      });
+    }
+
+    // ✅ Zerodha (Audited official charges and connection state)
+    const zerodha = brokerConfig.brokers.ZERODHA;
+    if (zerodha) {
+      brokerList.push({
+        broker: "ZERODHA",
+        name: zerodha.name,
+        planName: "Standard",
+        accountOpening: zerodha.accountOpening.display,
+        accountOpeningDetails: zerodha.accountOpening.details,
+        amc: zerodha.amc,
+        delivery: zerodha.displayValues.delivery,
+        intraday: zerodha.displayValues.intraday,
+        futures: zerodha.displayValues.futures,
+        options: zerodha.displayValues.options,
+        commodities: zerodha.displayValues.commodities,
+        currency: zerodha.displayValues.currency,
+        dpCharges: zerodha.displayValues.dpCharges,
+        autoSquareOff: zerodha.displayValues.autoSquareOff,
+        callAndTrade: zerodha.displayValues.callAndTrade,
+        apiCharges: zerodha.displayValues.apiCharges,
+        segments: zerodha.segments,
+        highlights: zerodha.highlights,
+        connection: connectedBrokers.has("ZERODHA") ? "Connected" : "Not configured"
+      });
+    }
+
     // Kotak Neo - Trade Free Plan (Standard / 30+)
     const kotak = brokerConfig.brokers.KOTAK_NEO;
     const kotakTF = kotak.plans.TRADE_FREE;
@@ -939,8 +1001,9 @@ export const getLiveTradingSummary = async (req, res) => {
       status: "COMPLETE"
     }).lean();
 
-    if (!trades || trades.length === 0) {
-      trades = await TradeRecord.find({}).limit(50).lean();
+    // ✅ Fixed data leak: Never return other users' trades when user has no trades
+    if (!trades) {
+      trades = [];
     }
 
     const allPositions = positionEngine.processTrades(trades);
@@ -1180,7 +1243,10 @@ export const createTrade = async (req, res) => {
       orderId
     } = req.body;
 
-    if (!userId || !brokerAccountId || !symbol || !transactionType || !quantity || !executedPrice) {
+    // ✅ Always enforce authenticated user ID to prevent IDOR trade injection
+    const effectiveUserId = req.user?.userId || userId;
+
+    if (!effectiveUserId || !brokerAccountId || !symbol || !transactionType || !quantity || !executedPrice) {
       return res.status(400).json({
         success: false,
         message: "userId, brokerAccountId, symbol, transactionType, quantity, and executedPrice are required"
@@ -1190,7 +1256,7 @@ export const createTrade = async (req, res) => {
     const tId = tradeId || `TRD-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
     const trade = await TradeRecord.create({
-      userId,
+      userId: effectiveUserId,
       brokerAccountId,
       broker: broker || "ANGEL_ONE",
       tradeId: tId,
@@ -1227,9 +1293,15 @@ export const deleteTrade = async (req, res) => {
       return res.status(400).json({ success: false, message: "Valid trade ID required" });
     }
 
-    const deleted = await TradeRecord.findByIdAndDelete(id);
+    // ✅ Enforce ownership check so User A cannot delete User B's trade
+    const deleteQuery = { _id: id };
+    if (req.user?.userId) {
+      deleteQuery.userId = new mongoose.Types.ObjectId(req.user.userId);
+    }
+
+    const deleted = await TradeRecord.findOneAndDelete(deleteQuery);
     if (!deleted) {
-      return res.status(404).json({ success: false, message: "Trade record not found" });
+      return res.status(404).json({ success: false, message: "Trade record not found or access denied" });
     }
 
     return res.status(200).json({

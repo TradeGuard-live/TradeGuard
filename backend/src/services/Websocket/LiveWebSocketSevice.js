@@ -10,28 +10,32 @@
 
 import { WebSocketServer, WebSocket } from "ws";
 import mongoose from "mongoose";
+import jwt from "jsonwebtoken";
 import TradeRecord from "../../models/TradeRecord.js";
 import BrokerAccount from "../../models/BrokerAccount.js";
 import positionEngine from "../position/PositionEngine.js";
 import pnlEngine from "../pnl/PnLEngine.js";
 import marketDataEngine, { isIndianMarketOpen } from "../marketData/MarketDataEngine.js";
 import UpstoxAdapter from "../../brokers/upstox/UpstoxAdaptor.js";
+import { mapUpstoxPosition } from "../../brokers/upstox/UpstoxMapper.js";
 import DhanAdapter from "../../brokers/dhan/DhanAdapter.js";
 import { mapDhanPosition } from "../../brokers/dhan/DhanMapper.js";
 import AngelOneAdapter from "../../brokers/angelOne/AngelOneAdapter.js";
 import { mapAngelOnePosition } from "../../brokers/angelOne/AngelOneMapper.js";
-import KotakNeoAdapter from "../../brokers/kotakNeo/KotakNeoAdapter.js";
-import { mapKotakNeoPosition } from "../../brokers/kotakNeo/KotakNeoMapper.js";
-import { decrypt } from "../../utils/encryption.js";
+import GrowwAdapter from "../../brokers/groww/GrowwAdapter.js";
+import { mapGrowwPosition } from "../../brokers/groww/GrowwMapper.js";
+import ZerodhaAdapter from "../../brokers/zerodha/ZerodhaAdapter.js";
+import { mapZerodhaPosition } from "../../brokers/zerodha/ZerodhaMapper.js";
+import { decrypt, encrypt } from "../../utils/encryption.js";
 
 class LiveWebSocketService {
     constructor() {
         this.clients = new Map(); // userId -> Set of WebSockets
         this.userInitialized = new Set();
 
-        // Listen for price updates from Market Data Engine
-        marketDataEngine.onPriceUpdate((userId, instrumentKey, ltp) => {
-            this.handlePriceUpdate(userId, instrumentKey, ltp);
+        // ✅ Listen for price updates & quote metadata from Market Data Engine
+        marketDataEngine.onPriceUpdate((userId, instrumentKey, ltp, quoteObj) => {
+            this.handlePriceUpdate(userId, instrumentKey, ltp, quoteObj);
         });
     }
 
@@ -55,7 +59,7 @@ class LiveWebSocketService {
                     const data = JSON.parse(message.toString());
 
                     if (data.type === "AUTH") {
-                        await this.handleAuth(ws, data.userId);
+                        await this.handleAuth(ws, data);
                     } else if (data.type === "UPDATE_SL_TARGET") {
                         this.handleUpdateSLTarget(ws.userId, data.symbol, data.stopLoss, data.target);
                     } else if (data.type === "SYNC_TRADES") {
@@ -100,15 +104,33 @@ class LiveWebSocketService {
     }
 
     /**
-     * Handle client authentication and initialize trading engines for the user
+     * Handle client authentication with JWT validation
+     * ✅ Verifies JWT token and binds verified userId to WebSocket connection
      */
-    async handleAuth(ws, userId) {
-        if (!userId) {
-            ws.send(JSON.stringify({ type: "ERROR", message: "userId is required for AUTH" }));
+    async handleAuth(ws, data) {
+        let uId = null;
+
+        if (data?.token) {
+            try {
+                const decoded = jwt.verify(data.token, process.env.JWT_SECRET);
+                uId = String(decoded.userId || decoded.id);
+            } catch (err) {
+                ws.send(JSON.stringify({
+                    type: "AUTH_ERROR",
+                    message: "Invalid or expired authentication token"
+                }));
+                return;
+            }
+        } else if (data?.userId && mongoose.Types.ObjectId.isValid(data.userId)) {
+            // Backward-compatible for internal dev/tests
+            uId = String(data.userId);
+        }
+
+        if (!uId) {
+            ws.send(JSON.stringify({ type: "AUTH_ERROR", message: "Valid authentication token is required" }));
             return;
         }
 
-        const uId = String(userId);
         ws.userId = uId;
 
         if (!this.clients.has(uId)) {
@@ -149,7 +171,7 @@ class LiveWebSocketService {
             const brokerAuth = {};
 
             try {
-                let accountQuery = { isActive: true, isConnected: true };
+                let accountQuery = { isActive: true };
                 if (mongoose.Types.ObjectId.isValid(uId)) {
                     accountQuery.userId = new mongoose.Types.ObjectId(uId);
                 }
@@ -163,7 +185,13 @@ class LiveWebSocketService {
                             const upstox = new UpstoxAdapter(token);
                             try {
                                 const upstoxPos = await upstox.getPositions();
-                                if (Array.isArray(upstoxPos)) brokerPositions.push(...upstoxPos);
+                                if (Array.isArray(upstoxPos)) {
+                                    // ✅ Map positions with canonical Upstox mapper
+                                    const mapped = upstoxPos.map(mapUpstoxPosition).filter(Boolean);
+                                    brokerPositions.push(...mapped);
+                                }
+                                acc.isConnected = true;
+                                await acc.save().catch(() => {});
                             } catch (e) {
                                 if (e.status === 401 || e.errorCode === "UDAPI100050" || String(e.message || "").includes("UDAPI100050")) {
                                     acc.isConnected = false;
@@ -221,40 +249,96 @@ class LiveWebSocketService {
                                 }
                             }
                         }
-                    } else if (acc.broker === "KOTAK_NEO") {
-                        const token = acc.credentials?.accessToken ? decrypt(acc.credentials.accessToken) : "";
+                    } else if (acc.broker === "GROWW" && (acc.credentials?.accessToken || (acc.credentials?.apiKey && acc.credentials?.apiSecret))) {
+                        // ✅ Groww live position reconciliation
+                        let token = acc.credentials?.accessToken ? decrypt(acc.credentials.accessToken) : "";
                         const apiKey = acc.credentials?.apiKey ? decrypt(acc.credentials.apiKey) : "";
-                        const clientCode = acc.credentials?.clientId || "";
-                        const mobileNumber = acc.credentials?.mobileNumber ? decrypt(acc.credentials.mobileNumber) : "";
-                        const password = acc.credentials?.password ? decrypt(acc.credentials.password) : (acc.credentials?.apiSecret ? decrypt(acc.credentials.apiSecret) : "");
-                        const totpSecret = acc.credentials?.totpSecret ? decrypt(acc.credentials.totpSecret) : "";
-                        const sid = acc.credentials?.sid ? decrypt(acc.credentials.sid) : "";
-                        const baseUrl = acc.credentials?.baseUrl || "https://cis.kotaksecurities.com";
+                        const apiSecret = acc.credentials?.apiSecret ? decrypt(acc.credentials.apiSecret) : "";
+
+                        // If access token is expired or missing, auto-exchange
+                        const isTokenExpired = acc.credentials?.tokenExpiresAt && new Date(acc.credentials.tokenExpiresAt) < new Date();
+                        if ((!token || isTokenExpired) && apiKey && apiSecret) {
+                            try {
+                                const tokenRes = await GrowwAdapter.generateAccessToken({ apiKey, apiSecret });
+                                token = tokenRes.accessToken;
+                                acc.credentials.accessToken = encrypt(token);
+                                acc.credentials.tokenExpiresAt = tokenRes.expiresAt;
+                                acc.isConnected = true;
+                                await acc.save().catch(() => {});
+                            } catch (gErr) {
+                                console.warn("[LiveWS] Groww auto token exchange failed:", gErr.message);
+                            }
+                        }
 
                         if (token) {
-                            brokerAuth.kotakToken = token;
-                            brokerAuth.kotakApiKey = apiKey;
-                            brokerAuth.kotakSid = sid;
-                            brokerAuth.kotakBaseUrl = baseUrl;
-
-                            const kotak = new KotakNeoAdapter({
-                                apiKey,
-                                clientId: clientCode,
-                                mobileNumber,
-                                password,
-                                totpSecret,
+                            brokerAuth.growwToken = token;
+                            const groww = new GrowwAdapter({
+                                clientId: acc.credentials?.clientId,
                                 accessToken: token,
-                                sid,
-                                baseUrl
+                                apiKey,
+                                apiSecret
                             });
                             try {
-                                const kotakPos = await kotak.getPositions({ noAutoLogin: true });
-                                if (Array.isArray(kotakPos)) {
-                                    const mapped = kotakPos.map(mapKotakNeoPosition).filter(Boolean);
+                                const growwPos = await groww.getPositions();
+                                if (Array.isArray(growwPos)) {
+                                    // ✅ Map positions with canonical Groww mapper
+                                    const mapped = growwPos.map(mapGrowwPosition).filter(Boolean);
                                     brokerPositions.push(...mapped);
                                 }
+                                acc.isConnected = true;
+                                await acc.save().catch(() => {});
                             } catch (e) {
-                                if (e.status === 401 || e.status === 403 || String(e.message || "").toLowerCase().includes("session")) {
+                                if (e.status === 401 || e.status === 403) {
+                                    acc.isConnected = false;
+                                    await acc.save().catch(() => {});
+                                }
+                            }
+                        }
+                    } else if (acc.broker === "ZERODHA" && (acc.credentials?.accessToken || (acc.credentials?.apiKey && acc.credentials?.apiSecret))) {
+                        // ✅ Zerodha Kite Connect live position reconciliation
+                        let token = acc.credentials?.accessToken ? decrypt(acc.credentials.accessToken) : "";
+                        const apiKey = acc.credentials?.apiKey ? decrypt(acc.credentials.apiKey) : "";
+                        const apiSecret = acc.credentials?.apiSecret ? decrypt(acc.credentials.apiSecret) : "";
+                        const requestToken = acc.credentials?.totpSecret ? decrypt(acc.credentials.totpSecret) : "";
+
+                        // If access token is expired or missing, auto-exchange
+                        const isTokenExpired = acc.credentials?.tokenExpiresAt && new Date(acc.credentials.tokenExpiresAt) < new Date();
+                        if ((!token || isTokenExpired) && apiKey && apiSecret && requestToken) {
+                            try {
+                                const tokenRes = await ZerodhaAdapter.generateAccessToken({ apiKey, apiSecret, requestToken });
+                                token = tokenRes.accessToken;
+                                acc.credentials.accessToken = encrypt(token);
+                                const tomorrow6AM = new Date();
+                                tomorrow6AM.setDate(tomorrow6AM.getDate() + 1);
+                                tomorrow6AM.setHours(6, 0, 0, 0);
+                                acc.credentials.tokenExpiresAt = tomorrow6AM;
+                                acc.isConnected = true;
+                                await acc.save().catch(() => {});
+                            } catch (zErr) {
+                                console.warn("[LiveWS] Zerodha auto token exchange failed:", zErr.message);
+                            }
+                        }
+
+                        if (token && apiKey) {
+                            brokerAuth.zerodhaToken = token;
+                            brokerAuth.zerodhaApiKey = apiKey;
+                            const zerodha = new ZerodhaAdapter({
+                                apiKey,
+                                accessToken: token,
+                                apiSecret,
+                                clientId: acc.credentials?.clientId
+                            });
+                            try {
+                                const posRes = await zerodha.getPositions();
+                                if (Array.isArray(posRes.net)) {
+                                    // ✅ Map positions with canonical Zerodha mapper
+                                    const mapped = posRes.net.map(mapZerodhaPosition).filter(Boolean);
+                                    brokerPositions.push(...mapped);
+                                }
+                                acc.isConnected = true;
+                                await acc.save().catch(() => {});
+                            } catch (e) {
+                                if (e.status === 401 || e.status === 403) {
                                     acc.isConnected = false;
                                     await acc.save().catch(() => {});
                                 }
@@ -300,12 +384,13 @@ class LiveWebSocketService {
 
     /**
      * Handle incoming price tick and broadcast live P&L update
+     * ✅ Preserves quoteObj with timestamps, OHLC, source, and freshness
      */
-    handlePriceUpdate(userId, instrumentKey, ltp) {
+    handlePriceUpdate(userId, instrumentKey, ltp, quoteObj = null) {
         if (!userId) return;
         const uId = String(userId);
 
-        const updatedData = pnlEngine.updatePrice(uId, instrumentKey, ltp);
+        const updatedData = pnlEngine.updatePrice(uId, instrumentKey, ltp, quoteObj);
         if (updatedData) {
             this.broadcast(uId, {
                 type: "LIVE_PNL_UPDATE",

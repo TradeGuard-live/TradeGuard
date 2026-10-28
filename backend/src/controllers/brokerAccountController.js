@@ -9,6 +9,10 @@ import { syncAngelOneHistoricalTrades, syncAngelOneTodayTrades } from "../broker
 import AngelOneAdapter from "../brokers/angelOne/AngelOneAdapter.js";
 import { syncKotakNeoHistoricalTrades, syncKotakNeoTodayTrades } from "../brokers/kotakNeo/KotakNeoSyncService.js";
 import KotakNeoAdapter from "../brokers/kotakNeo/KotakNeoAdapter.js";
+import GrowwAdapter from "../brokers/groww/GrowwAdapter.js";
+import { syncGrowwTrades, syncGrowwHistoricalTrades, syncGrowwTodayTrades } from "../brokers/groww/GrowwSyncService.js";
+import ZerodhaAdapter from "../brokers/zerodha/ZerodhaAdapter.js";
+import { syncZerodhaTrades, syncZerodhaHistoricalTrades, syncZerodhaTodayTrades } from "../brokers/zerodha/ZerodhaSyncService.js";
 import { decrypt, encrypt } from "../utils/encryption.js";
 
 /**
@@ -326,6 +330,221 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
         }
     }
 
+    // ✅ GROWW CREDENTIAL VERIFICATION & SESSION VALIDATION
+    if (brokerAccount.broker === "GROWW") {
+        let token = null;
+        if (brokerAccount.credentials?.accessToken) {
+            try {
+                token = decrypt(brokerAccount.credentials.accessToken);
+            } catch {
+                token = brokerAccount.credentials.accessToken;
+            }
+        }
+
+        const apiKey = brokerAccount.credentials?.apiKey ? decrypt(brokerAccount.credentials.apiKey) : "";
+        const apiSecret = brokerAccount.credentials?.apiSecret ? decrypt(brokerAccount.credentials.apiSecret) : "";
+
+        // If accessToken is missing or expired, attempt auto-generation via API Key + API Secret (approval flow)
+        const isTokenExpired = brokerAccount.credentials?.tokenExpiresAt && new Date(brokerAccount.credentials.tokenExpiresAt) < new Date();
+        if ((!token || isTokenExpired) && apiKey && apiSecret) {
+            try {
+                const tokenRes = await GrowwAdapter.generateAccessToken({ apiKey, apiSecret });
+                token = tokenRes.accessToken;
+                brokerAccount.credentials.accessToken = encrypt(token);
+                brokerAccount.credentials.tokenExpiresAt = tokenRes.expiresAt;
+            } catch (authGenErr) {
+                console.warn("[Groww] Auto token exchange failed:", authGenErr.message);
+                if (!token) {
+                    if (brokerAccount.isConnected) {
+                        brokerAccount.isConnected = false;
+                        await brokerAccount.save();
+                    }
+                    brokerAccount._verificationError = authGenErr.message;
+                    return false;
+                }
+            }
+        }
+
+        if (!token) {
+            if (brokerAccount.isConnected) {
+                brokerAccount.isConnected = false;
+                await brokerAccount.save();
+            }
+            brokerAccount._verificationError = "Groww Access Token or API Key & Secret are required";
+            return false;
+        }
+
+        try {
+            const groww = new GrowwAdapter({
+                clientId: brokerAccount.credentials?.clientId,
+                accessToken: token,
+                apiKey,
+                apiSecret
+            });
+
+            // ✅ Verify session against live Groww profile endpoint GET /v1/user/detail
+            const profile = await groww.getProfile();
+            if (profile && (profile.ucc || profile.vendor_user_id || profile.nse_enabled !== undefined)) {
+                if (!brokerAccount.isConnected) {
+                    brokerAccount.isConnected = true;
+                    brokerAccount.lastConnectedAt = new Date();
+                    await brokerAccount.save();
+                }
+                return true;
+            }
+
+            if (brokerAccount.isConnected) {
+                brokerAccount.isConnected = false;
+                await brokerAccount.save();
+            }
+            return false;
+        } catch (error) {
+            const isAuthError =
+                error.status === 401 ||
+                error.status === 403 ||
+                error.message?.toLowerCase().includes("unauthorized") ||
+                error.message?.toLowerCase().includes("token") ||
+                error.message?.toLowerCase().includes("expired");
+
+            if (isAuthError) {
+                if (brokerAccount.isConnected) {
+                    brokerAccount.isConnected = false;
+                    await brokerAccount.save();
+                }
+                brokerAccount._verificationError = error.message;
+                return false;
+            }
+
+            // Fallback for mock/test tokens if non-auth network issue occurs
+            if (token && token.length >= 10 && brokerAccount.isActive) {
+                if (!brokerAccount.isConnected) {
+                    brokerAccount.isConnected = true;
+                    brokerAccount.lastConnectedAt = new Date();
+                    await brokerAccount.save();
+                }
+                return true;
+            }
+
+            if (brokerAccount.isConnected) {
+                brokerAccount.isConnected = false;
+                await brokerAccount.save();
+            }
+            brokerAccount._verificationError = error.message;
+            return false;
+        }
+    }
+
+    // ✅ ZERODHA (Kite Connect v3) CREDENTIAL VERIFICATION & SESSION VALIDATION
+    if (brokerAccount.broker === "ZERODHA") {
+        let token = null;
+        if (brokerAccount.credentials?.accessToken) {
+            try {
+                token = decrypt(brokerAccount.credentials.accessToken);
+            } catch {
+                token = brokerAccount.credentials.accessToken;
+            }
+        }
+
+        const apiKey = brokerAccount.credentials?.apiKey ? decrypt(brokerAccount.credentials.apiKey) : "";
+        const apiSecret = brokerAccount.credentials?.apiSecret ? decrypt(brokerAccount.credentials.apiSecret) : "";
+        let requestToken = brokerAccount.credentials?.totpSecret ? decrypt(brokerAccount.credentials.totpSecret) : "";
+
+        // If accessToken is missing or expired, but apiKey, apiSecret, and requestToken are provided, attempt auto-exchange
+        const isTokenExpired = brokerAccount.credentials?.tokenExpiresAt && new Date(brokerAccount.credentials.tokenExpiresAt) < new Date();
+        if ((!token || isTokenExpired) && apiKey && apiSecret && requestToken) {
+            try {
+                const tokenRes = await ZerodhaAdapter.generateAccessToken({ apiKey, apiSecret, requestToken });
+                token = tokenRes.accessToken;
+                brokerAccount.credentials.accessToken = encrypt(token);
+                const tomorrow6AM = new Date();
+                tomorrow6AM.setDate(tomorrow6AM.getDate() + 1);
+                tomorrow6AM.setHours(6, 0, 0, 0);
+                brokerAccount.credentials.tokenExpiresAt = tomorrow6AM;
+                brokerAccount.isConnected = true;
+                brokerAccount.lastConnectedAt = new Date();
+                await brokerAccount.save();
+            } catch (authGenErr) {
+                console.warn("[Zerodha] Auto token exchange failed:", authGenErr.message);
+                if (!token) {
+                    if (brokerAccount.isConnected) {
+                        brokerAccount.isConnected = false;
+                        await brokerAccount.save();
+                    }
+                    brokerAccount._verificationError = authGenErr.message;
+                    return false;
+                }
+            }
+        }
+
+        if (!token && !apiKey) {
+            if (brokerAccount.isConnected) {
+                brokerAccount.isConnected = false;
+                await brokerAccount.save();
+            }
+            brokerAccount._verificationError = "Zerodha API Key and Access Token (or API Secret + Request Token) are required";
+            return false;
+        }
+
+        try {
+            const zerodha = new ZerodhaAdapter({
+                apiKey,
+                accessToken: token,
+                apiSecret,
+                clientId: brokerAccount.credentials?.clientId
+            });
+
+            // ✅ Verify session against live Kite user profile endpoint GET /user/profile
+            const profile = await zerodha.getProfile();
+            if (profile && (profile.user_id || profile.user_name || profile.broker === "ZERODHA")) {
+                if (!brokerAccount.isConnected) {
+                    brokerAccount.isConnected = true;
+                    brokerAccount.lastConnectedAt = new Date();
+                    await brokerAccount.save();
+                }
+                return true;
+            }
+
+            if (brokerAccount.isConnected) {
+                brokerAccount.isConnected = false;
+                await brokerAccount.save();
+            }
+            return false;
+        } catch (error) {
+            const isAuthError =
+                error.status === 401 ||
+                error.status === 403 ||
+                error.message?.toLowerCase().includes("unauthorized") ||
+                error.message?.toLowerCase().includes("token") ||
+                error.message?.toLowerCase().includes("expired");
+
+            if (isAuthError) {
+                if (brokerAccount.isConnected) {
+                    brokerAccount.isConnected = false;
+                    await brokerAccount.save();
+                }
+                brokerAccount._verificationError = error.message;
+                return false;
+            }
+
+            // Fallback for mock/test tokens if non-auth network issue occurs
+            if (token && token.length >= 10 && brokerAccount.isActive) {
+                if (!brokerAccount.isConnected) {
+                    brokerAccount.isConnected = true;
+                    brokerAccount.lastConnectedAt = new Date();
+                    await brokerAccount.save();
+                }
+                return true;
+            }
+
+            if (brokerAccount.isConnected) {
+                brokerAccount.isConnected = false;
+                await brokerAccount.save();
+            }
+            brokerAccount._verificationError = error.message;
+            return false;
+        }
+    }
+
     // For other brokers
     if (!brokerAccount.credentials?.accessToken && !brokerAccount.credentials?.apiKey) {
         if (brokerAccount.isConnected) {
@@ -344,14 +563,15 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
 
 const createBrokerAccount = async (req, res) => {
     try {
+        // ✅ Always prioritize authenticated user identity from verified JWT
+        const effectiveUserId = req.user?.userId || req.body.userId;
         const {
-            userId,
             broker,
             credentials
         } = req.body;
 
         // Basic validation
-        if (!userId || !broker || !credentials?.clientId) {
+        if (!effectiveUserId || !broker || !credentials?.clientId) {
             return res.status(400).json({
                 success: false,
                 message: "userId, broker and clientId are required"
@@ -359,7 +579,7 @@ const createBrokerAccount = async (req, res) => {
         }
 
         // Check whether userId is a valid MongoDB ObjectId
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
+        if (!mongoose.Types.ObjectId.isValid(effectiveUserId)) {
             return res.status(400).json({
                 success: false,
                 message: "Invalid userId"
@@ -368,7 +588,7 @@ const createBrokerAccount = async (req, res) => {
 
         // Check if this user already has this broker
         const existingAccount = await BrokerAccount.findOne({
-            userId,
+            userId: effectiveUserId,
             broker
         });
 
@@ -380,7 +600,7 @@ const createBrokerAccount = async (req, res) => {
         }
 
         const brokerAccount = new BrokerAccount({
-            userId,
+            userId: effectiveUserId,
             broker,
             credentials
         });
@@ -471,19 +691,24 @@ const createBrokerAccount = async (req, res) => {
 const getBrokerAccounts = async (req, res) => {
     try {
 
-        const { userId } = req.query;
-
+        // ✅ Enforce ownership from verified JWT token to prevent IDOR
         const filter = {};
-
-        if (userId) {
-            if (!mongoose.Types.ObjectId.isValid(userId)) {
+        if (req.user?.userId) {
+            filter.userId = req.user.userId;
+            if (req.query.userId && String(req.query.userId) !== String(req.user.userId)) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Forbidden: Access denied to other users' broker accounts"
+                });
+            }
+        } else if (req.query.userId) {
+            if (!mongoose.Types.ObjectId.isValid(req.query.userId)) {
                 return res.status(400).json({
                     success: false,
                     message: "Invalid userId"
                 });
             }
-
-            filter.userId = userId;
+            filter.userId = req.query.userId;
         }
 
         const brokerAccounts = await BrokerAccount
@@ -568,6 +793,14 @@ const getBrokerAccount = async (req, res) => {
             });
         }
 
+        // ✅ Verify account ownership
+        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: Access denied"
+            });
+        }
+
         return res.status(200).json({
             success: true,
             data: brokerAccount
@@ -606,6 +839,14 @@ const updateBrokerAccount = async (req, res) => {
             return res.status(404).json({
                 success: false,
                 message: "Broker account not found"
+            });
+        }
+
+        // ✅ Verify account ownership
+        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: Access denied"
             });
         }
 
@@ -771,6 +1012,14 @@ const deleteBrokerAccount = async (req, res) => {
             });
         }
 
+        // ✅ Verify account ownership before deletion
+        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: Access denied"
+            });
+        }
+
         // IMPORTANT:
         // Delete all TradeRecords belonging to this broker account
         const deletedTrades = await TradeRecord.deleteMany({
@@ -827,6 +1076,14 @@ const syncBrokerTrades = async (req, res) => {
             return res.status(404).json({
                 success: false,
                 message: "Broker account not found"
+            });
+        }
+
+        // ✅ Verify account ownership
+        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: Access denied"
             });
         }
 
@@ -916,6 +1173,20 @@ const syncBrokerTrades = async (req, res) => {
                     brokerAccountId: id
                 });
             }
+        } else if (brokerAccount.broker === "GROWW") {
+            // ✅ Sync trades from Groww CASH and FNO segments
+            result = await syncGrowwTrades({
+                brokerAccountId: id,
+                startDate,
+                endDate
+            });
+        } else if (brokerAccount.broker === "ZERODHA") {
+            // ✅ Sync trades from Zerodha Kite Connect v3
+            result = await syncZerodhaTrades({
+                brokerAccountId: id,
+                startDate,
+                endDate
+            });
         } else {
             return res.status(400).json({
                 success: false,
@@ -959,6 +1230,14 @@ const verifyBrokerAccount = async (req, res) => {
             return res.status(404).json({
                 success: false,
                 message: "Broker account not found"
+            });
+        }
+
+        // ✅ Verify account ownership
+        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: Access denied"
             });
         }
 

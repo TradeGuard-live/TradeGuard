@@ -21,6 +21,8 @@ export default function BrokerComparison() {
     UPSTOX: true,
     DHAN: true,
     ANGEL_ONE: true,
+    GROWW: true,
+    ZERODHA: true,
     KOTAK_NEO: true,
     KOTAK_NEO_YOUTH: true,
   });
@@ -132,6 +134,34 @@ export default function BrokerComparison() {
           return Math.max(0, standardFee - discount);
         }
         return standardFee;
+      }
+
+      // ✅ GROWW (Lower of ₹20 or 0.05% for equity, flat ₹20 for F&O)
+      case 'GROWW': {
+        if (calcSegment === 'EQUITY_DELIVERY' || calcSegment === 'EQUITY_INTRADAY') {
+          return orders * Math.min(20, turnoverPerOrder * 0.0005);
+        }
+        if (calcSegment === 'FUTURES' || calcSegment === 'OPTIONS') {
+          return 20 * orders;
+        }
+        if (calcSegment === 'COMMODITY') {
+          return 0; // Commodity not offered via Groww API
+        }
+        return 20 * orders;
+      }
+
+      // ✅ ZERODHA (Zero for Equity Delivery, lower of ₹20 or 0.03% for Intraday/Futures, flat ₹20 for Options)
+      case 'ZERODHA': {
+        if (calcSegment === 'EQUITY_DELIVERY') {
+          return 0; // ₹0 Free Equity Delivery
+        }
+        if (calcSegment === 'EQUITY_INTRADAY' || calcSegment === 'FUTURES' || calcSegment === 'COMMODITY') {
+          return orders * Math.min(20, turnoverPerOrder * 0.0003);
+        }
+        if (calcSegment === 'OPTIONS') {
+          return 20 * orders;
+        }
+        return 20 * orders;
       }
 
       case 'KOTAK_NEO': {

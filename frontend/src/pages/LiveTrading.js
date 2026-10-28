@@ -27,10 +27,32 @@ function formatINR(val) {
   })}`;
 }
 
+// ✅ Renders quote freshness badge with semantic color codes
+function renderQuoteFreshnessBadge(status) {
+  switch (status) {
+    case 'LIVE':
+      return <span className="quote-badge quote-badge-live">LIVE</span>;
+    case 'MARKET CLOSED':
+      return <span className="quote-badge quote-badge-closed">MARKET CLOSED</span>;
+    case 'DELAYED':
+      return <span className="quote-badge quote-badge-delayed">DELAYED</span>;
+    case 'STALE':
+      return <span className="quote-badge quote-badge-stale">STALE</span>;
+    case 'CONNECTING':
+      return <span className="quote-badge quote-badge-stale">CONNECTING</span>;
+    case 'DISCONNECTED':
+      return <span className="quote-badge quote-badge-unavailable">DISCONNECTED</span>;
+    case 'UNAVAILABLE':
+    default:
+      return <span className="quote-badge quote-badge-unavailable">UNAVAILABLE</span>;
+  }
+}
+
 export default function LiveTrading() {
   const {
     isConnected,
     isConnecting,
+    isMarketOpen,
     error,
     positions,
     squaredPositions,
@@ -39,8 +61,11 @@ export default function LiveTrading() {
     priceFlash,
     updateSLTarget,
     syncTrades,
+    refresh,
     reconnect,
   } = useLiveTrading();
+
+  const [refreshing, setRefreshing] = useState(false);
 
   const [syncing, setSyncing] = useState(false);
   const [selectedChargesPosition, setSelectedChargesPosition] = useState(null);
@@ -55,6 +80,16 @@ export default function LiveTrading() {
       await syncTrades();
     } finally {
       setTimeout(() => setSyncing(false), 800);
+    }
+  };
+
+  // ✅ Non-destructive manual refresh action
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await refresh();
+    } finally {
+      setTimeout(() => setRefreshing(false), 600);
     }
   };
 
@@ -88,19 +123,48 @@ export default function LiveTrading() {
                 ? 'Connecting WS...'
                 : 'WS Offline'}
             </span>
+
+            {/* ✅ Market-Data & Exchange Session Status Badge */}
+            {isConnected ? (
+              isMarketOpen ? (
+                <span className="quote-badge quote-badge-live" title="Indian Stock Exchanges (NSE/BSE) are open">
+                  🟢 LIVE FEED
+                </span>
+              ) : (
+                <span className="quote-badge quote-badge-closed" title="Indian Stock Exchanges (NSE/BSE) are closed. Prices frozen to last official close.">
+                  ⚪ MARKET CLOSED
+                </span>
+              )
+            ) : isConnecting ? (
+              <span className="quote-badge quote-badge-stale">🟡 CONNECTING...</span>
+            ) : (
+              <span className="quote-badge quote-badge-unavailable">🔴 DISCONNECTED</span>
+            )}
           </div>
           <p className="page-description" style={{ marginTop: 4 }}>
             Real-time live P&amp;L, dynamic risk/reward, breakeven analysis, and 8-component combined charges streaming from Position &amp; P&amp;L Engines.
           </p>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           {lastTickTime && (
             <div className="live-clock-badge">
               <Zap size={13} style={{ color: '#10b981' }} />
               <span>Tick: {new Date(lastTickTime).toLocaleTimeString()}</span>
             </div>
           )}
+
+          {/* ✅ Manual refresh action that preserves valid positions */}
+          <button
+            className="btn btn-secondary"
+            onClick={handleRefresh}
+            disabled={refreshing}
+            style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+            title="Refresh positions without resetting valid market data"
+          >
+            <RefreshCw size={14} className={refreshing ? 'spinner-rotate' : ''} />
+            {refreshing ? 'Refreshing...' : 'Refresh'}
+          </button>
 
           <button
             className="btn btn-secondary"
@@ -128,40 +192,56 @@ export default function LiveTrading() {
       )}
 
       {/* Top Metric Cards */}
+      {/* ✅ Top Metric Cards: Separates Invested Capital, Market Value, Gross P&L, Charges, Net P&L, Realized P&L */}
       <div className="stat-grid live-stat-grid" style={{ marginBottom: 24 }}>
-        {/* 1. Live Unrealized P&L */}
+        {/* 1. Invested Capital */}
+        <div className="live-card">
+          <div className="live-card-header">
+            <span className="live-card-label">Invested Capital</span>
+            <Layers size={16} style={{ color: '#94a3b8' }} />
+          </div>
+          <div className="live-card-value" style={{ color: 'var(--text-primary)' }}>
+            {formatINR(portfolioSummary.totalInvestedCapital || (positions.reduce((acc, p) => acc + (p.investedCapital || (p.openQuantity * p.averagePrice)), 0)))}
+          </div>
+          <div className="live-card-sub">
+            <span>Entry price basis</span>
+            <span style={{ color: 'var(--text-secondary)' }}>{positions.length} Open Pos</span>
+          </div>
+        </div>
+
+        {/* 2. Current Market Value */}
+        <div className="live-card">
+          <div className="live-card-header">
+            <span className="live-card-label">Current Market Value</span>
+            <Activity size={16} style={{ color: '#38bdf8' }} />
+          </div>
+          <div className="live-card-value" style={{ color: '#38bdf8' }}>
+            {formatINR(portfolioSummary.totalMarketValue || (positions.reduce((acc, p) => acc + (p.marketValue || (p.openQuantity * (p.ltp || p.averagePrice))), 0)))}
+          </div>
+          <div className="live-card-sub">
+            <span>Dynamic open valuation</span>
+            <span className="live-badge-glow">Live Quote</span>
+          </div>
+        </div>
+
+        {/* 3. Unrealized Gross P&L */}
         <div className={`live-card ${portfolioSummary.totalUnrealizedPnL >= 0 ? 'card-emerald' : 'card-rose'}`}>
           <div className="live-card-header">
-            <span className="live-card-label">Live Unrealized P&amp;L</span>
-            <Activity size={16} className="live-icon-pulse" />
+            <span className="live-card-label">Unrealized Gross P&amp;L</span>
+            <Scale size={16} style={{ color: portfolioSummary.totalUnrealizedPnL >= 0 ? '#10b981' : '#ef4444' }} />
           </div>
           <div className={`live-card-value ${portfolioSummary.totalUnrealizedPnL >= 0 ? 'text-emerald' : 'text-rose'}`}>
             {formatINR(portfolioSummary.totalUnrealizedPnL)}
           </div>
           <div className="live-card-sub">
-            <span>Dynamic market value</span>
-            <span className="live-badge-glow">Real-Time</span>
-          </div>
-        </div>
-
-        {/* 2. Gross P&L */}
-        <div className="live-card">
-          <div className="live-card-header">
-            <span className="live-card-label">Gross P&amp;L</span>
-            <Scale size={16} style={{ color: '#60a5fa' }} />
-          </div>
-          <div className={`live-card-value ${isGrossProfit ? 'text-emerald' : 'text-rose'}`}>
-            {formatINR(portfolioSummary.totalGrossPnL)}
-          </div>
-          <div className="live-card-sub">
-            <span>Unrealized + Realized</span>
+            <span>Market Value − Invested</span>
             <span style={{ color: 'var(--text-secondary)' }}>
               Realized: {formatINR(portfolioSummary.totalRealizedPnL)}
             </span>
           </div>
         </div>
 
-        {/* 3. Total Combined Charges */}
+        {/* 4. Total Combined Charges */}
         <div className="live-card">
           <div className="live-card-header">
             <span className="live-card-label">Total Charges (Combined)</span>
@@ -182,7 +262,7 @@ export default function LiveTrading() {
           </div>
         </div>
 
-        {/* 4. Net P&L */}
+        {/* 5. Net P&L */}
         <div className={`live-card ${isNetProfit ? 'card-emerald' : 'card-rose'}`}>
           <div className="live-card-header">
             <span className="live-card-label">Net P&amp;L</span>
@@ -201,24 +281,7 @@ export default function LiveTrading() {
           </div>
         </div>
 
-        {/* 5. Risk Amount */}
-        <div className="live-card">
-          <div className="live-card-header">
-            <span className="live-card-label">Risk Amount (Active SL)</span>
-            <ShieldAlert size={16} style={{ color: '#f87171' }} />
-          </div>
-          <div className="live-card-value" style={{ color: '#f87171' }}>
-            {formatINR(portfolioSummary.totalRiskAmount)}
-          </div>
-          <div className="live-card-sub">
-            <span>Calculated from Stop Losses</span>
-            <span style={{ color: 'var(--text-secondary)' }}>
-              {positions.length} Open Pos
-            </span>
-          </div>
-        </div>
-
-        {/* 6. Live Risk / Reward Ratio */}
+        {/* 6. Live Risk / Reward */}
         <div className="live-card">
           <div className="live-card-header">
             <span className="live-card-label">Live Risk / Reward</span>
@@ -228,7 +291,7 @@ export default function LiveTrading() {
             {portfolioSummary.portfolioRiskRewardText || '1:2.0'}
           </div>
           <div className="live-card-sub">
-            <span>Target vs Stop Loss</span>
+            <span>Risk: {formatINR(portfolioSummary.totalRiskAmount)}</span>
             <span className="live-rr-tag">Portfolio Avg</span>
           </div>
         </div>
@@ -267,15 +330,17 @@ export default function LiveTrading() {
         </div>
 
         {/* TAB 1: OPEN POSITIONS */}
+        {/* TAB 1: OPEN POSITIONS */}
         {activeTab === 'open' && (
           <div className="table-responsive">
             <table className="data-table live-table">
               <thead>
                 <tr>
-                  <th>Instrument</th>
-                  <th>Side / Qty</th>
-                  <th>Avg Price</th>
-                  <th>Live LTP</th>
+                  <th>Instrument &amp; Exchange</th>
+                  <th>Direction / Qty</th>
+                  <th>Avg Entry Price</th>
+                  <th>Current / Valid Price</th>
+                  <th>Market Value</th>
                   <th>Breakeven</th>
                   <th>Stop Loss &amp; Risk Amt</th>
                   <th>Target &amp; Live R:R</th>
@@ -288,7 +353,7 @@ export default function LiveTrading() {
               <tbody>
                 {positions.length === 0 ? (
                   <tr>
-                    <td colSpan={11} style={{ textAlign: 'center', padding: 48, color: 'var(--text-muted)' }}>
+                    <td colSpan={12} style={{ textAlign: 'center', padding: 48, color: 'var(--text-muted)' }}>
                       No active open positions. Sync your Upstox account or execute a trade to view real-time data.
                     </td>
                   </tr>
@@ -309,9 +374,12 @@ export default function LiveTrading() {
                         ? editingTarget[pos.symbol]
                         : pos.target;
 
+                    const currentLtp = Number(pos.ltp || 0);
+                    const hasValidQuote = currentLtp > 0;
+
                     return (
                       <tr key={pos.id || pos.symbol} className="live-tr-row">
-                        {/* 1. Instrument */}
+                        {/* 1. Instrument & Exchange */}
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -330,7 +398,7 @@ export default function LiveTrading() {
                           </div>
                         </td>
 
-                        {/* 2. Side & Quantity */}
+                        {/* 2. Direction & Quantity */}
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column' }}>
                             <span
@@ -348,25 +416,45 @@ export default function LiveTrading() {
                           </div>
                         </td>
 
-                        {/* 3. Avg Price */}
+                        {/* 3. Avg Entry Price */}
                         <td>
                           <span className="mono" style={{ fontSize: 14, fontWeight: 500 }}>
                             ₹{Number(pos.averagePrice).toFixed(2)}
                           </span>
                         </td>
 
-                        {/* 4. Live LTP with Flashing Animation */}
+                        {/* 4. Current / Valid Price with Freshness Badge & Timestamp */}
                         <td>
-                          <div className={`live-ltp-cell ${flash === 'up' ? 'flash-up' : flash === 'down' ? 'flash-down' : ''}`}>
-                            <span className="mono live-ltp-text">
-                              ₹{Number(pos.ltp).toFixed(2)}
-                            </span>
-                            {flash === 'up' && <ArrowUpRight size={14} className="tick-arrow up" />}
-                            {flash === 'down' && <ArrowDownRight size={14} className="tick-arrow down" />}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                            <div className={`live-ltp-cell ${flash === 'up' ? 'flash-up' : flash === 'down' ? 'flash-down' : ''}`}>
+                              <span className="mono live-ltp-text">
+                                {hasValidQuote ? `₹${currentLtp.toFixed(2)}` : 'Unavailable'}
+                              </span>
+                              {flash === 'up' && <ArrowUpRight size={14} className="tick-arrow up" />}
+                              {flash === 'down' && <ArrowDownRight size={14} className="tick-arrow down" />}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                              {renderQuoteFreshnessBadge(pos.quoteFreshness || (pos.isMarketClosed ? 'MARKET CLOSED' : (isConnected ? 'LIVE' : 'UNAVAILABLE')))}
+                              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                                {pos.quoteTime ? new Date(pos.quoteTime).toLocaleTimeString() : (lastTickTime ? new Date(lastTickTime).toLocaleTimeString() : '—')}
+                              </span>
+                            </div>
                           </div>
                         </td>
 
-                        {/* 5. Breakeven Price & Distance */}
+                        {/* 5. Market Value & Invested Capital */}
+                        <td>
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span className="mono" style={{ fontSize: 14, fontWeight: 600 }}>
+                              {formatINR(pos.marketValue || (pos.openQuantity * (currentLtp || pos.averagePrice)))}
+                            </span>
+                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                              Invested: {formatINR(pos.investedCapital || (pos.openQuantity * pos.averagePrice))}
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* 6. Breakeven Price & Distance */}
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                             <span className="mono" style={{ fontWeight: 600, color: '#f59e0b' }}>

@@ -19,15 +19,18 @@
  */
 
 import brokerConfig, { calculateBrokerageForLeg } from "../brokers/brokerConfig.js";
+import quoteCache from "../marketData/quoteCache.js";
+import { getMarketSession } from "../marketData/marketSessionService.js";
 
 function round2(val) {
+    if (val === null || val === undefined) return null;
     return Math.round((Number(val || 0) + Number.EPSILON) * 100) / 100;
 }
 
 export class PnLEngine {
     constructor() {
         this.positions = new Map();     // userId -> Array of open positions from PositionEngine
-        this.latestPrices = new Map();  // userId -> Map(symbol/instrumentToken -> ltp)
+        this.latestPrices = new Map();  // userId -> Map(symbol/instrumentToken -> { ltp, quoteObj, previousLtp })
         this.riskSettings = new Map();  // userId -> Map(symbol -> { stopLoss, target })
     }
 
@@ -59,8 +62,9 @@ export class PnLEngine {
 
     /**
      * Updates LTP for an instrument and re-calculates all live metrics for the user.
+     * ✅ Accepts validated quote object and stores previous price for tick direction detection.
      */
-    updatePrice(userId, instrumentKey, ltp) {
+    updatePrice(userId, instrumentKey, ltp, quoteObj = null) {
         if (!userId) return null;
         const uId = String(userId);
         if (!this.latestPrices.has(uId)) {
@@ -68,8 +72,26 @@ export class PnLEngine {
         }
 
         const price = Number(ltp);
-        if (Number.isFinite(price) && price > 0) {
-            this.latestPrices.get(uId).set(instrumentKey, price);
+        if (quoteCache.isValidPrice(price)) {
+            const userPrices = this.latestPrices.get(uId);
+            const existing = userPrices.get(instrumentKey);
+            const prevLtp = existing?.ltp || (typeof existing === "number" ? existing : price);
+
+            userPrices.set(instrumentKey, {
+                ltp: price,
+                previousLtp: prevLtp,
+                quoteObj,
+                updatedAt: Date.now()
+            });
+
+            // Also record quote in quoteCache
+            if (quoteObj) {
+                quoteCache.updateQuote({
+                    instrumentKey,
+                    lastPrice: price,
+                    ...quoteObj
+                });
+            }
         }
 
         return this.calculate(uId);
@@ -375,31 +397,66 @@ export class PnLEngine {
             const symbol = pos.symbol || "UNKNOWN";
             const instrumentKey = pos.instrumentToken || symbol;
 
-            // Resolve LTP: from latest prices Map -> last broker price -> avg price
-            const ltp = prices.get(instrumentKey) ??
-                        prices.get(symbol) ??
-                        pos.lastBrokerPrice ??
-                        pos.averagePrice ?? 0;
+            // ✅ Resolve quote and LTP with strict semantic separation from entry price
+            const cachedQuote = quoteCache.getQuote(instrumentKey) || quoteCache.getQuote(symbol);
+            const userPriceEntry = prices.get(instrumentKey) || prices.get(symbol);
+
+            const rawPrice = (typeof userPriceEntry === "object" ? userPriceEntry?.ltp : userPriceEntry) ??
+                             cachedQuote?.lastPrice ??
+                             pos.lastBrokerPrice ??
+                             null;
+
+            const ltp = quoteCache.isValidPrice(rawPrice) ? Number(rawPrice) : null;
+            const previousLtp = userPriceEntry?.previousLtp ?? cachedQuote?.previousClose ?? ltp;
+            const previousClose = cachedQuote?.previousClose ?? (quoteCache.isValidPrice(pos.closePrice) ? Number(pos.closePrice) : null);
+            const sessionOpen = cachedQuote?.sessionOpen ?? null;
+            const sessionHigh = cachedQuote?.sessionHigh ?? null;
+            const sessionLow = cachedQuote?.sessionLow ?? null;
+            const lastPriceAt = userPriceEntry?.quoteObj?.lastPriceAt || cachedQuote?.lastPriceAt || null;
+            const quoteReceivedAt = userPriceEntry?.updatedAt || cachedQuote?.quoteReceivedAt || null;
+
+            const session = getMarketSession(pos.exchange || "NSE", pos.segment || "EQUITY");
+            const marketStatus = session.session;
+
+            let quoteFreshness = "UNAVAILABLE";
+            let quoteSource = userPriceEntry?.quoteObj?.source || cachedQuote?.quoteSource || (pos.lastBrokerPrice ? "BROKER_POSITION" : "NONE");
+
+            if (ltp !== null) {
+                if (!session.isOpen) {
+                    quoteFreshness = "MARKET_CLOSED";
+                } else if (cachedQuote?.quoteFreshness) {
+                    quoteFreshness = cachedQuote.quoteFreshness;
+                } else {
+                    quoteFreshness = "LIVE";
+                }
+            }
 
             const quantity = Number(pos.openQuantity || Math.abs(pos.netQuantity) || 0);
             const averagePrice = Number(pos.averagePrice || 0);
             const side = pos.side === "SELL" || pos.netQuantity < 0 ? "SELL" : "BUY";
             const isLong = side === "BUY";
 
-            // Gross Unrealized P&L
-            let unrealizedGrossPnL = 0;
-            if (isLong) {
-                unrealizedGrossPnL = (ltp - averagePrice) * quantity;
-            } else {
-                unrealizedGrossPnL = (averagePrice - ltp) * quantity;
-            }
-            unrealizedGrossPnL = round2(unrealizedGrossPnL);
+            // Valuation: Invested capital vs dynamic market value
+            const investedCapital = round2(averagePrice * quantity);
+            const marketValue = ltp !== null ? round2(ltp * quantity) : null;
 
-            // Gross Realized P&L from squared lots
+            // Gross Unrealized P&L: strictly from valid LTP
+            let unrealizedGrossPnL = null;
+            if (ltp !== null) {
+                if (isLong) {
+                    unrealizedGrossPnL = round2((ltp - averagePrice) * quantity);
+                } else {
+                    unrealizedGrossPnL = round2((averagePrice - ltp) * quantity);
+                }
+            }
+
+            // Gross Realized P&L: strictly from closed/squared lots
             const realizedGrossPnL = round2(Number(pos.realizedPnL || 0));
 
             // Gross P&L (Total)
-            const grossPnL = round2(unrealizedGrossPnL + realizedGrossPnL);
+            const grossPnL = unrealizedGrossPnL !== null
+                ? round2(unrealizedGrossPnL + realizedGrossPnL)
+                : realizedGrossPnL;
 
             // Charges (all 8 combined)
             const charges = this.calculateChargesForPosition({
@@ -409,7 +466,7 @@ export class PnLEngine {
                 productType: pos.productType,
                 quantity,
                 entryPrice: averagePrice,
-                exitPrice: ltp
+                exitPrice: ltp !== null ? ltp : averagePrice
             });
 
             // Net P&L = Gross P&L - Total Charges
@@ -426,11 +483,11 @@ export class PnLEngine {
                 productType: pos.productType
             });
 
-            const distanceToBreakeven = isLong
-                ? round2(ltp - breakevenPrice)
-                : round2(breakevenPrice - ltp);
+            const distanceToBreakeven = (ltp !== null && breakevenPrice > 0)
+                ? (isLong ? round2(ltp - breakevenPrice) : round2(breakevenPrice - ltp))
+                : 0;
 
-            const distanceToBreakevenPct = breakevenPrice > 0
+            const distanceToBreakevenPct = (breakevenPrice > 0 && ltp !== null)
                 ? round2((distanceToBreakeven / breakevenPrice) * 100)
                 : 0;
 
@@ -473,18 +530,19 @@ export class PnLEngine {
                 : 1;
 
             // Live Dynamic Risk / Reward Ratio (as LTP changes)
+            const liveLtp = ltp !== null ? ltp : averagePrice;
             let liveRiskDistance = 0;
             let liveRewardDistance = 0;
             let liveRiskRewardRatio = initialRiskRewardRatio;
             let liveStatus = "IN_PROGRESS";
 
             if (isLong) {
-                liveRiskDistance = ltp - stopLoss;
-                liveRewardDistance = target - ltp;
-                if (ltp <= stopLoss) {
+                liveRiskDistance = liveLtp - stopLoss;
+                liveRewardDistance = target - liveLtp;
+                if (liveLtp <= stopLoss) {
                     liveStatus = "SL_TRIGGERED";
                     liveRiskRewardRatio = 0;
-                } else if (ltp >= target) {
+                } else if (liveLtp >= target) {
                     liveStatus = "TARGET_REACHED";
                     liveRiskRewardRatio = round2(rewardPerUnit / riskPerUnit);
                 } else {
@@ -493,12 +551,12 @@ export class PnLEngine {
                         : 0;
                 }
             } else {
-                liveRiskDistance = stopLoss - ltp;
-                liveRewardDistance = ltp - target;
-                if (ltp >= stopLoss) {
+                liveRiskDistance = stopLoss - liveLtp;
+                liveRewardDistance = liveLtp - target;
+                if (liveLtp >= stopLoss) {
                     liveStatus = "SL_TRIGGERED";
                     liveRiskRewardRatio = 0;
-                } else if (ltp <= target) {
+                } else if (liveLtp <= target) {
                     liveStatus = "TARGET_REACHED";
                     liveRiskRewardRatio = round2(rewardPerUnit / riskPerUnit);
                 } else {
@@ -510,7 +568,7 @@ export class PnLEngine {
 
             // Accumulate portfolio aggregates
             totalGrossPnL += grossPnL;
-            totalUnrealizedPnL += unrealizedGrossPnL;
+            totalUnrealizedPnL += (unrealizedGrossPnL || 0);
             totalRealizedPnL += realizedGrossPnL;
             totalNetPnL += netPnL;
             totalRiskAmount += riskAmount;
@@ -537,13 +595,28 @@ export class PnLEngine {
                 openQuantity: quantity,
                 netQuantity: pos.netQuantity || quantity,
                 averagePrice,
-                ltp: round2(ltp),
-                previousLtp: prices.get(`${instrumentKey}_prev`) ?? ltp,
+                averageEntryPrice: averagePrice,
+                investedCapital,
+                marketValue,
+                // ✅ Strictly separated market quote attributes
+                ltp: ltp !== null ? round2(ltp) : null,
+                lastPrice: ltp !== null ? round2(ltp) : null,
+                previousLtp: round2(previousLtp),
+                previousClose: round2(previousClose),
+                sessionOpen: round2(sessionOpen),
+                sessionHigh: round2(sessionHigh),
+                sessionLow: round2(sessionLow),
+                lastPriceAt,
+                quoteReceivedAt,
+                quoteSource,
+                quoteFreshness,
+                marketStatus,
+                isMarketOpen: session.isOpen,
                 unrealizedGrossPnL,
                 realizedGrossPnL,
                 grossPnL,
                 netPnL,
-                pnlPercentage: averagePrice > 0
+                pnlPercentage: (averagePrice > 0 && unrealizedGrossPnL !== null)
                     ? round2((unrealizedGrossPnL / (averagePrice * quantity)) * 100)
                     : 0,
                 // Breakeven metrics

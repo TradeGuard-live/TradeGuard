@@ -5,6 +5,7 @@ export function useLiveTrading() {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(true);
   const [error, setError] = useState(null);
+  const [isMarketOpen, setIsMarketOpen] = useState(true);
 
   const [positions, setPositions] = useState([]);
   const [allPositions, setAllPositions] = useState([]);
@@ -15,6 +16,8 @@ export function useLiveTrading() {
     totalUnrealizedPnL: 0,
     totalRealizedPnL: 0,
     totalNetPnL: 0,
+    totalInvestedCapital: 0,
+    totalMarketValue: 0,
     totalRiskAmount: 0,
     portfolioRiskReward: 1,
     portfolioRiskRewardText: '1:1.0',
@@ -38,15 +41,16 @@ export function useLiveTrading() {
   const wsRef = useRef(null);
   const previousPricesRef = useRef(new Map());
   const reconnectTimeoutRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
   const isMountedRef = useRef(true);
 
-  // Retrieve current user ID
+  // ✅ Retrieve current authenticated user ID from storage without hardcoded dummy fallback
   const getUserId = useCallback(() => {
     try {
       const user = JSON.parse(localStorage.getItem('tg_user') || 'null');
-      return user?.userId || user?.id || user?._id || '6aba05ee5724ee5fded23bc7';
+      return user?.userId || user?.id || user?._id || '';
     } catch {
-      return '6aba05ee5724ee5fded23bc7';
+      return '';
     }
   }, []);
 
@@ -54,19 +58,21 @@ export function useLiveTrading() {
   const loadInitialSnapshot = useCallback(async () => {
     try {
       const userId = getUserId();
+      if (!userId) return;
       const res = await api.liveTradingSummary(userId);
       if (res?.data && isMountedRef.current) {
         if (res.data.positions) setPositions(res.data.positions);
         if (res.data.portfolioSummary) setPortfolioSummary(res.data.portfolioSummary);
         if (res.data.allPositions) setAllPositions(res.data.allPositions);
         if (res.data.squaredPositions) setSquaredPositions(res.data.squaredPositions);
+        if (typeof res.data.isMarketOpen === 'boolean') setIsMarketOpen(res.data.isMarketOpen);
       }
     } catch (err) {
       console.warn('Could not load initial snapshot via HTTP:', err.message);
     }
   }, [getUserId]);
 
-  // Connect to WebSocket
+  // Connect to WebSocket with JWT authentication
   const connectWebSocket = useCallback(() => {
     if (!isMountedRef.current) return;
 
@@ -86,10 +92,12 @@ export function useLiveTrading() {
         setIsConnected(true);
         setIsConnecting(false);
         setError(null);
+        reconnectAttemptsRef.current = 0;
 
-        // Authenticate with user ID
+        // ✅ Authenticate with JWT token & verified user ID
         const userId = getUserId();
-        ws.send(JSON.stringify({ type: 'AUTH', userId }));
+        const token = localStorage.getItem('tg_token');
+        ws.send(JSON.stringify({ type: 'AUTH', token, userId }));
       };
 
       ws.onmessage = (event) => {
@@ -103,18 +111,21 @@ export function useLiveTrading() {
             if (!data) return;
 
             setLastTickTime(Date.now());
+            if (typeof data.isMarketOpen === 'boolean') {
+              setIsMarketOpen(data.isMarketOpen);
+            }
 
             if (data.portfolioSummary) {
               setPortfolioSummary(data.portfolioSummary);
             }
 
             if (Array.isArray(data.positions)) {
-              // Calculate price flash (up/down tick)
+              // Calculate price flash (up/down tick) only during open market with valid quotes
               const flashUpdates = {};
               data.positions.forEach((p) => {
                 const sym = p.symbol || p.instrumentToken;
                 const prev = previousPricesRef.current.get(sym);
-                if (prev !== undefined && p.ltp !== prev) {
+                if (prev !== undefined && p.ltp !== prev && p.ltp > 0 && p.quoteFreshness !== 'MARKET CLOSED') {
                   flashUpdates[sym] = p.ltp > prev ? 'up' : 'down';
                 }
                 previousPricesRef.current.set(sym, p.ltp);
@@ -154,13 +165,16 @@ export function useLiveTrading() {
         setIsConnected(false);
         setIsConnecting(false);
 
-        // Schedule auto-reconnect in 3 seconds
+        // ✅ Reconnect with bounded exponential backoff (2s, 4s, 8s, max 16s)
+        const delay = Math.min(2000 * Math.pow(2, reconnectAttemptsRef.current), 16000);
+        reconnectAttemptsRef.current += 1;
+
         if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = setTimeout(() => {
           if (isMountedRef.current) {
             connectWebSocket();
           }
-        }, 3000);
+        }, delay);
       };
     } catch (err) {
       if (isMountedRef.current) {
@@ -207,9 +221,15 @@ export function useLiveTrading() {
     await loadInitialSnapshot();
   }, [loadInitialSnapshot]);
 
+  // ✅ Non-destructive manual refresh that retains existing position data
+  const refresh = useCallback(async () => {
+    await loadInitialSnapshot();
+  }, [loadInitialSnapshot]);
+
   return {
     isConnected,
     isConnecting,
+    isMarketOpen,
     error,
     positions,
     allPositions,
@@ -219,6 +239,7 @@ export function useLiveTrading() {
     priceFlash,
     updateSLTarget,
     syncTrades,
+    refresh,
     reconnect: connectWebSocket,
   };
 }

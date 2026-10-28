@@ -21,7 +21,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test tests/brokerPricingAudit.test.js"
+    "test": "node --test tests/*.test.js"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

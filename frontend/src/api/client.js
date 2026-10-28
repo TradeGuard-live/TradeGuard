@@ -60,8 +60,9 @@ function withUserId(path, userId) {
 }
 
 export const api = {
+  // ✅ Authenticate user via username or email
   login: (identifier, password) =>
-    request('/api/users', {
+    request('/api/users/login', {
       method: 'POST',
       body: JSON.stringify({
         email: identifier,

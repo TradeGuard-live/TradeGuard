@@ -5,7 +5,7 @@ import { Card } from '../components/Card';
 import { useToast } from '../components/Toast';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
-import { BROKER_META } from '../data/mockData';
+import { BROKER_META, SUPPORTED_BROKERS } from '../data/mockData';
 
 export default function BrokerAccountForm() {
   const { id } = useParams();
@@ -192,7 +192,7 @@ export default function BrokerAccountForm() {
               onChange={(e) => update('broker', e.target.value)}
               disabled={isEdit}
             >
-              {Object.entries(BROKER_META).map(([key, meta]) => (
+              {Object.entries(isEdit ? BROKER_META : SUPPORTED_BROKERS).map(([key, meta]) => (
                 <option key={key} value={key}>{meta.name}</option>
               ))}
             </select>
@@ -217,22 +217,58 @@ export default function BrokerAccountForm() {
             </div>
           )}
 
+          {/* ✅ Kotak Neo is deprecated: Notice for existing legacy accounts */}
           {form.broker === 'KOTAK_NEO' && (
             <div style={{
-              background: 'rgba(225, 29, 72, 0.08)',
-              border: '1px solid rgba(225, 29, 72, 0.25)',
+              background: 'rgba(239, 68, 68, 0.08)',
+              border: '1px solid rgba(239, 68, 68, 0.25)',
               borderRadius: 8,
               padding: '12px 16px',
               marginBottom: 16,
               fontSize: '0.875rem',
-              color: '#e11d48'
+              color: '#ef4444'
             }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>Kotak Neo Trade API Setup Guide:</div>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Notice: Kotak Neo Integration Deprecated</div>
+              <p style={{ margin: 0, fontSize: '0.8125rem' }}>
+                Kotak Neo active integration has been sunset. Historical trade records are preserved for calculation and reporting. For active trading and live market data, please connect Upstox, Dhan, or Angel One.
+              </p>
+            </div>
+          )}
+
+          {/* ✅ Groww Trade API Setup Guide */}
+          {form.broker === 'GROWW' && (
+            <div style={{
+              background: 'rgba(0, 208, 156, 0.08)',
+              border: '1px solid rgba(0, 208, 156, 0.25)',
+              borderRadius: 8,
+              padding: '12px 16px',
+              marginBottom: 16,
+              fontSize: '0.875rem',
+              color: '#00a87e'
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Groww Trade API Setup Guide:</div>
               <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5, color: 'inherit' }}>
-                <li><strong>API Access Token:</strong> In Neo App or Web portal, navigate to <em>More → TradeAPI → API Dashboard</em>, click <em>Create Application</em> and copy the token.</li>
-                <li><strong>TOTP Registration:</strong> In API Dashboard on the top right, click <em>TOTP Registration</em>, scan the QR code with Google Authenticator, and copy the alphanumeric setup key.</li>
-                <li><strong>UCC & MPIN:</strong> Your 5-digit Client Code from Profile, and your 6-digit Trading MPIN.</li>
-                <li><strong>Automatic 2-Step Login:</strong> TradeGuard will automatically compute your 6-digit TOTP, validate your MPIN, and maintain your active trading session!</li>
+                <li><strong>Direct Access Token:</strong> Copy your daily access token directly from <a href="https://groww.in/trade-api/api-keys" target="_blank" rel="noreferrer" style={{ textDecoration: 'underline', color: 'inherit' }}>groww.in/trade-api/api-keys</a>.</li>
+                <li><strong>Automated Login (API Key & Secret):</strong> Under your API key on Groww, copy your <em>API Key</em> and <em>API Secret</em>. TradeGuard automatically computes your daily approval SHA-256 checksum and refreshes your session token!</li>
+              </ul>
+            </div>
+          )}
+
+          {/* ✅ Zerodha Kite Connect Setup Guide */}
+          {form.broker === 'ZERODHA' && (
+            <div style={{
+              background: 'rgba(56, 126, 209, 0.08)',
+              border: '1px solid rgba(56, 126, 209, 0.25)',
+              borderRadius: 8,
+              padding: '12px 16px',
+              marginBottom: 16,
+              fontSize: '0.875rem',
+              color: '#2a6cb8'
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Zerodha Kite Connect v3 Setup Guide:</div>
+              <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5, color: 'inherit' }}>
+                <li><strong>Direct Access Token:</strong> If you already generated a daily session token, enter your <em>API Key</em> and <em>Access Token</em>.</li>
+                <li><strong>Token Exchange:</strong> Navigate to <a href={form.apiKey ? `https://kite.zerodha.com/connect/login?v=3&api_key=${encodeURIComponent(form.apiKey)}` : "https://kite.zerodha.com"} target="_blank" rel="noreferrer" style={{ textDecoration: 'underline', color: 'inherit' }}>kite.zerodha.com/connect/login</a> with your API key. Copy the <code>request_token</code> from your redirect URL and paste it below with your <em>API Secret</em>. TradeGuard will automatically compute the SHA-256 checksum and obtain your session token!</li>
               </ul>
             </div>
           )}
@@ -243,6 +279,10 @@ export default function BrokerAccountForm() {
                 ? 'Dhan Client ID (e.g. 1000000001) *' 
                 : form.broker === 'ANGEL_ONE'
                 ? 'Angel One Client ID (e.g. A123456) *'
+                : form.broker === 'GROWW'
+                ? 'Groww Client ID / UCC (e.g. 924189) *'
+                : form.broker === 'ZERODHA'
+                ? 'Zerodha User ID (e.g. AB1234) *'
                 : form.broker === 'KOTAK_NEO'
                 ? 'Kotak Neo UCC / Client Code (e.g. AB123) *'
                 : 'Client ID *'}
@@ -254,6 +294,10 @@ export default function BrokerAccountForm() {
                   ? 'e.g. 1000000001 (found in Dhan profile)' 
                   : form.broker === 'ANGEL_ONE'
                   ? 'e.g. A123456 (your Angel One Client ID)'
+                  : form.broker === 'GROWW'
+                  ? 'e.g. 924189 (found in Groww user profile)'
+                  : form.broker === 'ZERODHA'
+                  ? 'e.g. AB1234 (your Zerodha Kite User ID)'
                   : form.broker === 'KOTAK_NEO'
                   ? 'e.g. AB123 (your 5-digit Kotak Neo UCC)'
                   : 'e.g. Upstox UCC or Client ID'
@@ -349,14 +393,57 @@ export default function BrokerAccountForm() {
               label={
                 form.broker === 'DHAN' 
                   ? 'Dhan Access Token (JWT from DhanHQ API portal) *' 
+                  : form.broker === 'GROWW'
+                  ? 'Groww Access Token (Direct Access Token from Trading API dashboard)'
+                  : form.broker === 'ZERODHA'
+                  ? 'Kite Access Token (or leave blank if using Request Token below)'
                   : 'Upstox Access Token (Bearer JWT) *'
               } 
               placeholder={
                 form.broker === 'DHAN' 
                   ? 'Paste Dhan 24-hr access token (from dhanhq.co)' 
+                  : form.broker === 'GROWW'
+                  ? 'Paste Groww Bearer access token (starts with eyJ...)'
+                  : form.broker === 'ZERODHA'
+                  ? 'Paste 32-character Kite Access Token (optional if Request Token provided)'
                   : 'Paste Upstox Bearer access token'
               } 
             />
+          )}
+
+          {form.broker === 'ZERODHA' && (
+            <>
+              <SecretField 
+                name="apiKey" 
+                label="Zerodha Kite API Key *" 
+                placeholder="Paste API Key from kite.trade developer console" 
+              />
+              <SecretField 
+                name="apiSecret" 
+                label="Zerodha Kite API Secret" 
+                placeholder="Paste API Secret from kite.trade developer console" 
+              />
+              <SecretField 
+                name="totpSecret" 
+                label="Request Token (from login redirect URL)" 
+                placeholder="Paste request_token received after logging in at kite.zerodha.com/connect/login" 
+              />
+            </>
+          )}
+
+          {form.broker === 'GROWW' && (
+            <>
+              <SecretField 
+                name="apiKey" 
+                label="Groww API Key (for Automated Token Exchange)" 
+                placeholder="Paste API Key from Groww Cloud API Keys page" 
+              />
+              <SecretField 
+                name="apiSecret" 
+                label="Groww API Secret (for SHA-256 Checksum)" 
+                placeholder="Paste API Secret from Groww Cloud API Keys page" 
+              />
+            </>
           )}
 
           {form.broker === 'UPSTOX' && (

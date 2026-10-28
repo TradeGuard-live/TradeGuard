@@ -11,7 +11,8 @@ const brokerAccountSchema = new mongoose.Schema(
 
         broker: {
             type: String,
-            enum: ["UPSTOX", "ANGEL_ONE", "DHAN", "KOTAK_NEO"],
+            // ✅ Supported brokers: UPSTOX, ANGEL_ONE, DHAN, KOTAK_NEO (legacy), GROWW, ZERODHA
+            enum: ["UPSTOX", "ANGEL_ONE", "DHAN", "KOTAK_NEO", "GROWW", "ZERODHA"],
             required: true
         },
 

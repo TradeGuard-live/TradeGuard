@@ -37,7 +37,8 @@ export default function TopBar({ title, subtitle }) {
 
   const connectedBrokers = Array.isArray(brokerAccounts) ? brokerAccounts.filter((a) => a.isConnected) : [];
   const hasConnectedBroker = connectedBrokers.length > 0;
-  const brokerName = connectedBrokers.map(b => b.broker === 'DHAN' ? 'Dhan' : b.broker === 'UPSTOX' ? 'Upstox' : b.broker === 'ANGEL_ONE' ? 'Angel One' : b.broker === 'KOTAK_NEO' ? 'Kotak Neo' : (b.broker || 'Broker')).join(' & ');
+  // ✅ Map connected broker enum to human-friendly display label
+  const brokerName = connectedBrokers.map(b => b.broker === 'DHAN' ? 'Dhan' : b.broker === 'UPSTOX' ? 'Upstox' : b.broker === 'ANGEL_ONE' ? 'Angel One' : b.broker === 'GROWW' ? 'Groww' : b.broker === 'ZERODHA' ? 'Zerodha' : b.broker === 'KOTAK_NEO' ? 'Kotak Neo' : (b.broker || 'Broker')).join(' & ');
 
   const initials = (user?.username || user?.email || 'NA')
     .split(' ')
