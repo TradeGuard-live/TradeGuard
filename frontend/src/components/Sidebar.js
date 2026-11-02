@@ -1,13 +1,14 @@
 import React from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, Link } from 'react-router-dom';
 import {
   Shield, LayoutDashboard, Wallet, ArrowLeftRight, BarChart3,
   Receipt, AlertTriangle, FileText, GitCompare, Settings, X, ChevronLeft,
-  Activity,
+  Activity, Copy
 } from 'lucide-react';
 
 const NAV_ITEMS = [
   { to: '/app/live', label: 'Live Trading', icon: Activity, isLive: true },
+  { to: '/app/copy-trading', label: 'Copy Trading', icon: Copy },
   { to: '/app/overview', label: 'Overview', icon: LayoutDashboard },
   { to: '/app/broker-accounts', label: 'Broker Accounts', icon: Wallet },
   { to: '/app/trades', label: 'Trades', icon: ArrowLeftRight },
@@ -23,10 +24,17 @@ export default function Sidebar({ collapsed, onToggle }) {
   return (
     <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
       <div className="sidebar-header">
-        <div className="sidebar-logo">
-          <Shield size={18} />
-        </div>
-        {!collapsed && <div className="sidebar-title">TradeGuard</div>}
+        <Link
+          to="/app/overview"
+          className="sidebar-brand"
+          title="TradeGuard Overview"
+          id="sidebar-logo-brand"
+        >
+          <div className="sidebar-logo">
+            <Shield size={18} />
+          </div>
+          {!collapsed && <div className="sidebar-title">TradeGuard</div>}
+        </Link>
       </div>
       <nav className="sidebar-nav">
         {NAV_ITEMS.map((item) => {

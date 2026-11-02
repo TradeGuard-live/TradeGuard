@@ -16,26 +16,29 @@ import BrokerAccount from "../../models/BrokerAccount.js";
 import positionEngine from "../position/PositionEngine.js";
 import pnlEngine from "../pnl/PnLEngine.js";
 import marketDataEngine, { isIndianMarketOpen } from "../marketData/MarketDataEngine.js";
-import UpstoxAdapter from "../../brokers/upstox/UpstoxAdaptor.js";
-import { mapUpstoxPosition } from "../../brokers/upstox/UpstoxMapper.js";
-import DhanAdapter from "../../brokers/dhan/DhanAdapter.js";
-import { mapDhanPosition } from "../../brokers/dhan/DhanMapper.js";
-import AngelOneAdapter from "../../brokers/angelOne/AngelOneAdapter.js";
-import { mapAngelOnePosition } from "../../brokers/angelOne/AngelOneMapper.js";
-import GrowwAdapter from "../../brokers/groww/GrowwAdapter.js";
-import { mapGrowwPosition } from "../../brokers/groww/GrowwMapper.js";
-import ZerodhaAdapter from "../../brokers/zerodha/ZerodhaAdapter.js";
-import { mapZerodhaPosition } from "../../brokers/zerodha/ZerodhaMapper.js";
-import { decrypt, encrypt } from "../../utils/encryption.js";
+import brokerSyncManager from "../brokerSync/BrokerSyncManager.js";
+import { copyExecutionRouter } from "../copyTrading/engine/CopyExecutionRouter.js";
+import OrderExecutionService from "../trading/OrderExecutionService.js";
 
 class LiveWebSocketService {
     constructor() {
         this.clients = new Map(); // userId -> Set of WebSockets
         this.userInitialized = new Set();
+        this.syncingUsers = new Set();
 
         // ✅ Listen for price updates & quote metadata from Market Data Engine
         marketDataEngine.onPriceUpdate((userId, instrumentKey, ltp, quoteObj) => {
             this.handlePriceUpdate(userId, instrumentKey, ltp, quoteObj);
+        });
+
+        // ✅ Stream Copy-Trading order synchronization events in real-time
+        copyExecutionRouter.onUpdate((type, orderMapping) => {
+            if (orderMapping?.userId) {
+                this.broadcast(orderMapping.userId, {
+                    type: "COPY_ORDER_UPDATE",
+                    data: orderMapping
+                });
+            }
         });
     }
 
@@ -62,8 +65,36 @@ class LiveWebSocketService {
                         await this.handleAuth(ws, data);
                     } else if (data.type === "UPDATE_SL_TARGET") {
                         this.handleUpdateSLTarget(ws.userId, data.symbol, data.stopLoss, data.target);
+                    } else if (data.type === "EXIT_POSITION") {
+                        if (!ws.userId) {
+                            ws.send(JSON.stringify({ type: "ERROR", message: "Not authenticated" }));
+                            return;
+                        }
+                        try {
+                            const res = await OrderExecutionService.executeExitPosition({
+                                userId: ws.userId,
+                                ...data
+                            });
+                            ws.send(JSON.stringify({ type: "ORDER_UPDATE", data: res }));
+                        } catch (err) {
+                            ws.send(JSON.stringify({ type: "ERROR", message: err.message }));
+                        }
+                    } else if (data.type === "EXIT_ALL_POSITIONS") {
+                        if (!ws.userId) {
+                            ws.send(JSON.stringify({ type: "ERROR", message: "Not authenticated" }));
+                            return;
+                        }
+                        try {
+                            const res = await OrderExecutionService.executeExitAllPositions({
+                                userId: ws.userId,
+                                ...data
+                            });
+                            ws.send(JSON.stringify({ type: "ORDER_UPDATE", data: res }));
+                        } catch (err) {
+                            ws.send(JSON.stringify({ type: "ERROR", message: err.message }));
+                        }
                     } else if (data.type === "SYNC_TRADES") {
-                        await this.refreshUserPositions(ws.userId);
+                        await this.refreshUserPositions(ws.userId, { broadcastTradeSync: true });
                     } else if (data.type === "PING") {
                         ws.send(JSON.stringify({ type: "PONG", timestamp: Date.now() }));
                     }
@@ -101,6 +132,27 @@ class LiveWebSocketService {
                 }
             }
         }, 30000);
+
+        // ✅ Automated real-time order & trade sync for connected active clients via WebSocket
+        this.orderSyncInterval = setInterval(async () => {
+            if (this.clients.size === 0) return;
+
+            for (const userId of this.clients.keys()) {
+                if (this.syncingUsers.has(userId)) continue;
+                this.syncingUsers.add(userId);
+
+                try {
+                    const syncRes = await brokerSyncManager.syncAllBrokersTodayTrades(userId).catch(() => ({ inserted: 0, updated: 0 }));
+                    if (syncRes.inserted > 0 || syncRes.updated > 0) {
+                        await this.refreshUserPositions(userId, { broadcastTradeSync: true });
+                    }
+                } catch {
+                    // Non-blocking background order poll
+                } finally {
+                    this.syncingUsers.delete(userId);
+                }
+            }
+        }, 15000);
     }
 
     /**
@@ -150,205 +202,45 @@ class LiveWebSocketService {
 
     /**
      * Loads trades, computes positions via PositionEngine, and starts MarketDataEngine + PnLEngine
+     * @param {string} userId
+     * @param {Object} [options]
+     * @param {boolean} [options.broadcastTradeSync=false]
      */
-    async refreshUserPositions(userId) {
+    async refreshUserPositions(userId, options = {}) {
         if (!userId) return;
         const uId = String(userId);
+        if (mongoose.connection.readyState !== 1) return;
 
         try {
-            // 1. Fetch trades from DB
+            // 1. Sync today's live trades for all user's active brokers & retrieve live broker positions
+            const syncResult = await brokerSyncManager.syncAllBrokersTodayTrades(uId).catch(err => {
+                console.warn("[LiveWS] Today trades sync notice:", err.message);
+                return { inserted: 0, updated: 0, skipped: 0, total: 0 };
+            });
+
+            const { brokerPositions, brokerAuth } = await brokerSyncManager.fetchAllBrokerPositions(uId).catch(err => {
+                console.warn("[LiveWS] Fetch broker positions notice:", err.message);
+                return { brokerPositions: [], brokerAuth: {} };
+            });
+
+            // If any trades were inserted or updated, broadcast TRADES_UPDATED so Trade History updates live
+            if (syncResult.inserted > 0 || syncResult.updated > 0 || options.broadcastTradeSync) {
+                this.broadcast(uId, {
+                    type: "TRADES_UPDATED",
+                    data: {
+                        inserted: syncResult.inserted,
+                        updated: syncResult.updated,
+                        total: syncResult.total
+                    }
+                });
+            }
+
+            // 2. Fetch all trades from DB (including today's newly synced live trades)
             let query = {};
             if (mongoose.Types.ObjectId.isValid(uId)) {
                 query = { userId: new mongoose.Types.ObjectId(uId) };
             }
-
             let trades = await TradeRecord.find(query).lean();
-
-            // User trades loaded
-
-            // 2. Check for active Upstox account to get broker positions & token
-            let brokerPositions = [];
-            const brokerAuth = {};
-
-            try {
-                let accountQuery = { isActive: true };
-                if (mongoose.Types.ObjectId.isValid(uId)) {
-                    accountQuery.userId = new mongoose.Types.ObjectId(uId);
-                }
-                const accounts = await BrokerAccount.find(accountQuery);
-
-                for (const acc of accounts) {
-                    if (acc.broker === "UPSTOX" && acc.credentials?.accessToken) {
-                        const token = decrypt(acc.credentials.accessToken);
-                        if (token) {
-                            brokerAuth.upstoxToken = token;
-                            const upstox = new UpstoxAdapter(token);
-                            try {
-                                const upstoxPos = await upstox.getPositions();
-                                if (Array.isArray(upstoxPos)) {
-                                    // ✅ Map positions with canonical Upstox mapper
-                                    const mapped = upstoxPos.map(mapUpstoxPosition).filter(Boolean);
-                                    brokerPositions.push(...mapped);
-                                }
-                                acc.isConnected = true;
-                                await acc.save().catch(() => {});
-                            } catch (e) {
-                                if (e.status === 401 || e.errorCode === "UDAPI100050" || String(e.message || "").includes("UDAPI100050")) {
-                                    acc.isConnected = false;
-                                    await acc.save().catch(() => {});
-                                }
-                            }
-                        }
-                    } else if (acc.broker === "DHAN" && acc.credentials?.accessToken) {
-                        const token = decrypt(acc.credentials.accessToken);
-                        const clientId = acc.credentials?.clientId;
-                        if (token && clientId) {
-                            brokerAuth.dhanToken = token;
-                            brokerAuth.dhanClientId = clientId;
-                            const dhan = new DhanAdapter({ clientId, accessToken: token });
-                            try {
-                                const dhanPos = await dhan.getPositions();
-                                if (Array.isArray(dhanPos)) {
-                                    const mapped = dhanPos.map(mapDhanPosition).filter(Boolean);
-                                    brokerPositions.push(...mapped);
-                                }
-                            } catch (e) {
-                                if (e.status === 401 || e.status === 403) {
-                                    acc.isConnected = false;
-                                    await acc.save().catch(() => {});
-                                }
-                            }
-                        }
-                    } else if (acc.broker === "ANGEL_ONE") {
-                        const token = acc.credentials?.accessToken ? decrypt(acc.credentials.accessToken) : "";
-                        const apiKey = acc.credentials?.apiKey ? decrypt(acc.credentials.apiKey) : "";
-                        const clientCode = acc.credentials?.clientId || "";
-                        const password = acc.credentials?.password ? decrypt(acc.credentials.password) : (acc.credentials?.apiSecret ? decrypt(acc.credentials.apiSecret) : "");
-                        const totpSecret = acc.credentials?.totpSecret ? decrypt(acc.credentials.totpSecret) : "";
-                        
-                        if (token) {
-                            brokerAuth.angelToken = token;
-                            brokerAuth.angelApiKey = apiKey;
-                            const angel = new AngelOneAdapter({
-                                apiKey,
-                                clientCode,
-                                password,
-                                totpSecret,
-                                accessToken: token
-                            });
-                            try {
-                                const angelPos = await angel.getPositions({ noAutoLogin: true });
-                                if (Array.isArray(angelPos)) {
-                                    const mapped = angelPos.map(mapAngelOnePosition).filter(Boolean);
-                                    brokerPositions.push(...mapped);
-                                }
-                            } catch (e) {
-                                if (e.status === 401 || e.errorCode === "AG8001" || e.errorCode === "AB8050") {
-                                    acc.isConnected = false;
-                                    await acc.save().catch(() => {});
-                                }
-                            }
-                        }
-                    } else if (acc.broker === "GROWW" && (acc.credentials?.accessToken || (acc.credentials?.apiKey && acc.credentials?.apiSecret))) {
-                        // ✅ Groww live position reconciliation
-                        let token = acc.credentials?.accessToken ? decrypt(acc.credentials.accessToken) : "";
-                        const apiKey = acc.credentials?.apiKey ? decrypt(acc.credentials.apiKey) : "";
-                        const apiSecret = acc.credentials?.apiSecret ? decrypt(acc.credentials.apiSecret) : "";
-
-                        // If access token is expired or missing, auto-exchange
-                        const isTokenExpired = acc.credentials?.tokenExpiresAt && new Date(acc.credentials.tokenExpiresAt) < new Date();
-                        if ((!token || isTokenExpired) && apiKey && apiSecret) {
-                            try {
-                                const tokenRes = await GrowwAdapter.generateAccessToken({ apiKey, apiSecret });
-                                token = tokenRes.accessToken;
-                                acc.credentials.accessToken = encrypt(token);
-                                acc.credentials.tokenExpiresAt = tokenRes.expiresAt;
-                                acc.isConnected = true;
-                                await acc.save().catch(() => {});
-                            } catch (gErr) {
-                                console.warn("[LiveWS] Groww auto token exchange failed:", gErr.message);
-                            }
-                        }
-
-                        if (token) {
-                            brokerAuth.growwToken = token;
-                            const groww = new GrowwAdapter({
-                                clientId: acc.credentials?.clientId,
-                                accessToken: token,
-                                apiKey,
-                                apiSecret
-                            });
-                            try {
-                                const growwPos = await groww.getPositions();
-                                if (Array.isArray(growwPos)) {
-                                    // ✅ Map positions with canonical Groww mapper
-                                    const mapped = growwPos.map(mapGrowwPosition).filter(Boolean);
-                                    brokerPositions.push(...mapped);
-                                }
-                                acc.isConnected = true;
-                                await acc.save().catch(() => {});
-                            } catch (e) {
-                                if (e.status === 401 || e.status === 403) {
-                                    acc.isConnected = false;
-                                    await acc.save().catch(() => {});
-                                }
-                            }
-                        }
-                    } else if (acc.broker === "ZERODHA" && (acc.credentials?.accessToken || (acc.credentials?.apiKey && acc.credentials?.apiSecret))) {
-                        // ✅ Zerodha Kite Connect live position reconciliation
-                        let token = acc.credentials?.accessToken ? decrypt(acc.credentials.accessToken) : "";
-                        const apiKey = acc.credentials?.apiKey ? decrypt(acc.credentials.apiKey) : "";
-                        const apiSecret = acc.credentials?.apiSecret ? decrypt(acc.credentials.apiSecret) : "";
-                        const requestToken = acc.credentials?.totpSecret ? decrypt(acc.credentials.totpSecret) : "";
-
-                        // If access token is expired or missing, auto-exchange
-                        const isTokenExpired = acc.credentials?.tokenExpiresAt && new Date(acc.credentials.tokenExpiresAt) < new Date();
-                        if ((!token || isTokenExpired) && apiKey && apiSecret && requestToken) {
-                            try {
-                                const tokenRes = await ZerodhaAdapter.generateAccessToken({ apiKey, apiSecret, requestToken });
-                                token = tokenRes.accessToken;
-                                acc.credentials.accessToken = encrypt(token);
-                                const tomorrow6AM = new Date();
-                                tomorrow6AM.setDate(tomorrow6AM.getDate() + 1);
-                                tomorrow6AM.setHours(6, 0, 0, 0);
-                                acc.credentials.tokenExpiresAt = tomorrow6AM;
-                                acc.isConnected = true;
-                                await acc.save().catch(() => {});
-                            } catch (zErr) {
-                                console.warn("[LiveWS] Zerodha auto token exchange failed:", zErr.message);
-                            }
-                        }
-
-                        if (token && apiKey) {
-                            brokerAuth.zerodhaToken = token;
-                            brokerAuth.zerodhaApiKey = apiKey;
-                            const zerodha = new ZerodhaAdapter({
-                                apiKey,
-                                accessToken: token,
-                                apiSecret,
-                                clientId: acc.credentials?.clientId
-                            });
-                            try {
-                                const posRes = await zerodha.getPositions();
-                                if (Array.isArray(posRes.net)) {
-                                    // ✅ Map positions with canonical Zerodha mapper
-                                    const mapped = posRes.net.map(mapZerodhaPosition).filter(Boolean);
-                                    brokerPositions.push(...mapped);
-                                }
-                                acc.isConnected = true;
-                                await acc.save().catch(() => {});
-                            } catch (e) {
-                                if (e.status === 401 || e.status === 403) {
-                                    acc.isConnected = false;
-                                    await acc.save().catch(() => {});
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (err) {
-                // Ignore broker account lookup failure
-            }
 
             // 3. Run Position Engine
             const allMatchedPositions = positionEngine.processTrades(trades);
@@ -436,4 +328,5 @@ class LiveWebSocketService {
 }
 
 const liveWebSocketService = new LiveWebSocketService();
+export { liveWebSocketService };
 export default liveWebSocketService;

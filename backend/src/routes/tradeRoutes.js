@@ -2,6 +2,7 @@ import express from "express";
 import { authenticate } from "../middleware/auth.js";
 import {
   listTrades,
+  syncAllTrades,
   getTradeSummary,
   getAnalytics,
   getReportData,
@@ -12,13 +13,18 @@ import {
   getLiveTradingSummary,
   getChargesAnalytics,
   createTrade,
-  deleteTrade
+  deleteTrade,
+  exitPosition,
+  exitAllPositions
 } from "../controllers/tradeController.js";
 
 const router = express.Router();
 
 // ✅ Enforce JWT authentication on all trade and portfolio endpoints
 router.get("/", authenticate, listTrades);
+router.post("/sync-all", authenticate, syncAllTrades);
+router.post("/exit-position", authenticate, exitPosition);
+router.post("/exit-all-positions", authenticate, exitAllPositions);
 router.post("/", authenticate, createTrade);
 router.delete("/:id", authenticate, deleteTrade);
 router.get("/summary", authenticate, getTradeSummary);

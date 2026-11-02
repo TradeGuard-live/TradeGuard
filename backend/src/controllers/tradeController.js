@@ -5,6 +5,10 @@ import { calculateCharges, calculatePnL } from "../services/calculations.js";
 import brokerConfig, { calculateBrokerageForLeg } from "../services/brokers/brokerConfig.js";
 import positionEngine from "../services/position/PositionEngine.js";
 import pnlEngine from "../services/pnl/PnLEngine.js";
+import brokerSyncManager from "../services/brokerSync/BrokerSyncManager.js";
+import { liveWebSocketService } from "../services/Websocket/LiveWebSocketSevice.js";
+import { decrypt } from "../utils/encryption.js";
+import OrderExecutionService from "../services/trading/OrderExecutionService.js";
 
 // ✅ Derive verified user identity from JWT to prevent IDOR vulnerabilities
 const getUserId = (req, res) => {
@@ -30,13 +34,24 @@ export const listTrades = async (req, res) => {
     const userId = getUserId(req, res);
     if (!userId) return;
     const { broker, side, search, limit = "500" } = req.query;
-    const filter = { userId, status: "COMPLETE" };
+
+    // ✅ Auto-sync today's live trades from all active brokers so executions reflect in Trade History
+    try {
+      await brokerSyncManager.syncAllBrokersTodayTrades(userId);
+    } catch (sErr) {
+      // non-fatal sync error
+    }
+
+    const filter = {
+      userId,
+      status: { $nin: ["CANCELLED", "REJECTED", "FAILED"] }
+    };
     if (broker && broker !== "all") filter.broker = broker;
     if (side && side !== "all") filter.transactionType = side.toUpperCase();
     if (search) filter.symbol = { $regex: String(search).slice(0, 80), $options: "i" };
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 500, 1), 2000);
     const records = await TradeRecord.find(filter)
-      .sort({ createdAt: -1 })
+      .sort({ tradeTime: -1, createdAt: -1 })
       .limit(safeLimit)
       .lean();
     return res.json({ success: true, count: records.length, data: records });
@@ -991,24 +1006,67 @@ export const calculateTradeCharges = async (req, res) => {
   }
 };
 
+export const syncAllTrades = async (req, res) => {
+  try {
+    const userId = getUserId(req, res);
+    if (!userId) return;
+
+    const result = await brokerSyncManager.syncAllBrokersTodayTrades(userId);
+
+    // Notify connected WebSocket clients of fresh trades
+    liveWebSocketService.broadcast(userId, {
+      type: "TRADES_UPDATED",
+      data: result
+    });
+    await liveWebSocketService.refreshUserPositions(userId);
+
+    const trades = await TradeRecord.find({
+      userId: new mongoose.Types.ObjectId(userId),
+      status: { $nin: ["CANCELLED", "REJECTED", "FAILED"] }
+    }).sort({ tradeTime: -1, createdAt: -1 }).limit(500).lean();
+
+    return res.json({
+      success: true,
+      message: `Trades synced successfully (${result.inserted} added, ${result.updated} updated)`,
+      result,
+      data: trades
+    });
+  } catch (error) {
+    console.error("Sync all trades error:", error.message);
+    return res.status(500).json({ success: false, message: "Failed to sync trades from brokers" });
+  }
+};
+
 export const getLiveTradingSummary = async (req, res) => {
   try {
     const userId = getUserId(req, res);
     if (!userId) return;
 
+    let brokerPositions = [];
+    try {
+      await brokerSyncManager.syncAllBrokersTodayTrades(userId);
+      const res = await brokerSyncManager.fetchAllBrokerPositions(userId);
+      brokerPositions = res.brokerPositions || [];
+    } catch (bErr) {
+      // non-fatal
+    }
+
     let trades = await TradeRecord.find({
       userId: new mongoose.Types.ObjectId(userId),
-      status: "COMPLETE"
+      status: { $nin: ["CANCELLED", "REJECTED", "FAILED"] }
     }).lean();
 
-    // ✅ Fixed data leak: Never return other users' trades when user has no trades
     if (!trades) {
       trades = [];
     }
 
     const allPositions = positionEngine.processTrades(trades);
-    const openPositions = positionEngine.getOpenPositions(trades);
+    let openPositions = positionEngine.getOpenPositions(trades);
     const squaredPositions = positionEngine.getFullySquaredPositions(trades);
+
+    if (brokerPositions.length > 0) {
+      openPositions = positionEngine.reconcileWithBrokerPositions(openPositions, brokerPositions);
+    }
 
     pnlEngine.setPositions(userId, openPositions);
     const calculated = pnlEngine.calculate(userId);
@@ -1314,5 +1372,79 @@ export const deleteTrade = async (req, res) => {
     return res.status(500).json({ success: false, message: "Failed to delete trade" });
   }
 };
+
+/**
+ * Exits a single open position with specified order type (MARKET, LIMIT, SL, SL-M)
+ * POST /api/trades/exit-position
+ */
+export const exitPosition = async (req, res) => {
+  try {
+    const userId = getUserId(req, res);
+    if (!userId) return;
+
+    const {
+      positionKey,
+      symbol,
+      exchange,
+      segment,
+      productType,
+      broker,
+      brokerAccountId,
+      securityId,
+      instrumentToken,
+      orderType,
+      quantity,
+      price,
+      triggerPrice
+    } = req.body;
+
+    const result = await OrderExecutionService.executeExitPosition({
+      userId,
+      positionKey,
+      symbol,
+      exchange,
+      segment,
+      productType,
+      broker,
+      brokerAccountId,
+      securityId,
+      instrumentToken,
+      orderType,
+      quantity,
+      price,
+      triggerPrice
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Exit position error:", error.message);
+    return res.status(400).json({ success: false, message: error.message || "Failed to exit position" });
+  }
+};
+
+/**
+ * Squares off / exits all active open positions for the user across brokers
+ * POST /api/trades/exit-all-positions
+ */
+export const exitAllPositions = async (req, res) => {
+  try {
+    const userId = getUserId(req, res);
+    if (!userId) return;
+
+    const { orderType, positions } = req.body;
+
+    const result = await OrderExecutionService.executeExitAllPositions({
+      userId,
+      orderType: orderType || "MARKET",
+      positions
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Exit all positions error:", error.message);
+    return res.status(400).json({ success: false, message: error.message || "Failed to exit all positions" });
+  }
+};
+
 
 

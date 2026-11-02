@@ -50,9 +50,11 @@ export default function ForgotPassword() {
   return (
     <div className="auth-container">
       <div className="auth-card">
-        <div className="auth-logo">
-          <Shield size={24} />
-        </div>
+        <Link to="/" style={{ display: 'block', textDecoration: 'none' }} title="TradeGuard Home">
+          <div className="auth-logo">
+            <Shield size={24} />
+          </div>
+        </Link>
         <h1 className="auth-title">Forgot password</h1>
         <p className="auth-subtitle">
           Enter your email and we'll send you a link to reset your password

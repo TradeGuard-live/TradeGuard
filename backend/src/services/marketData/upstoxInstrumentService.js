@@ -38,6 +38,8 @@ const KNOWN_INSTRUMENTS = {
     "NSE|HINDUNILVR": "NSE_EQ|INE030A01027",
     "NSE|WIPRO": "NSE_EQ|INE075A01022",
     "NSE|BSE": "NSE_EQ|INE118H01025",
+    "NSE|LTF": "NSE_EQ|INE498L01015",
+    "NSE|L&TFH": "NSE_EQ|INE498L01015",
 
     // BSE Equities
     "BSE|RELIANCE": "BSE_EQ|INE002A01018",
@@ -46,7 +48,8 @@ const KNOWN_INSTRUMENTS = {
     "BSE|INFY": "BSE_EQ|INE009A01021",
     "BSE|ICICIBANK": "BSE_EQ|INE090A01021",
     "BSE|SBIN": "BSE_EQ|INE062A01020",
-    "BSE|BSE": "BSE_EQ|INE118H01025"
+    "BSE|BSE": "BSE_EQ|INE118H01025",
+    "BSE|LTF": "BSE_EQ|INE498L01015"
 };
 
 class UpstoxInstrumentService {
@@ -64,6 +67,36 @@ class UpstoxInstrumentService {
                 symbol,
                 instrumentKey: instKey
             });
+        }
+    }
+
+    /**
+     * Downloads and indexes complete Upstox NSE instrument master in background
+     */
+    async initialize() {
+        if (this.isInitialized) return;
+        try {
+            const response = await axios.get("https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz", {
+                responseType: "arraybuffer",
+                timeout: 8000
+            });
+            const unzipped = zlib.gunzipSync(response.data).toString("utf-8");
+            const instruments = JSON.parse(unzipped);
+            for (const item of instruments) {
+                if (item.trading_symbol && item.instrument_key) {
+                    const ex = (item.exchange || "NSE").toUpperCase();
+                    const sym = this.normalizeSymbol(item.trading_symbol);
+                    this.cache.set(`${ex}|${sym}`, item.instrument_key);
+                    this.reverseCache.set(item.instrument_key, {
+                        exchange: ex,
+                        symbol: sym,
+                        instrumentKey: item.instrument_key
+                    });
+                }
+            }
+            this.isInitialized = true;
+        } catch (err) {
+            // Silently fall back to pre-seeded instruments if offline
         }
     }
 
@@ -189,4 +222,5 @@ class UpstoxInstrumentService {
 }
 
 const upstoxInstrumentService = new UpstoxInstrumentService();
+upstoxInstrumentService.initialize().catch(() => {});
 export default upstoxInstrumentService;

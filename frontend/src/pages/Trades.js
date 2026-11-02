@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Card } from '../components/Card';
-import { X, ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, Trash2, RefreshCw } from 'lucide-react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
 
@@ -58,39 +58,43 @@ export default function Trades() {
   const [search, setSearch] = useState('');
   const [drawerTrade, setDrawerTrade] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [syncing, setSyncing] = useState(false);
 
-  useEffect(() => {
-    let active = true;
-
-    async function loadTrades() {
+  const loadTrades = React.useCallback(async (silent = false) => {
+    if (!silent) {
       setLoading(true);
       setError('');
-
-      try {
-        const response = await api.listTrades();
-
-        if (active) {
-          setTrades(Array.isArray(response?.data) ? response.data : []);
-        }
-      } catch (err) {
-        if (active) {
-          setError(
-            err?.response?.data?.message ||
-              err?.message ||
-              'Unable to load saved trades.'
-          );
-        }
-      } finally {
-        if (active) setLoading(false);
-      }
     }
 
-    loadTrades();
-
-    return () => {
-      active = false;
-    };
+    try {
+      const response = await api.listTrades();
+      setTrades(Array.isArray(response?.data) ? response.data : []);
+    } catch (err) {
+      if (!silent) {
+        setError(
+          err?.response?.data?.message ||
+            err?.message ||
+            'Unable to load saved trades.'
+        );
+      }
+    } finally {
+      if (!silent) setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    loadTrades(false);
+
+    // ✅ Listen for live WebSocket trade executions and auto-sync events
+    const handleTradesUpdated = () => {
+      loadTrades(true);
+    };
+
+    window.addEventListener('tg_trades_updated', handleTradesUpdated);
+    return () => {
+      window.removeEventListener('tg_trades_updated', handleTradesUpdated);
+    };
+  }, [loadTrades]);
 
   const brokers = useMemo(
     () => [...new Set(trades.map((trade) => trade.broker).filter(Boolean))].sort(),
@@ -100,8 +104,18 @@ export default function Trades() {
   const filtered = useMemo(() => {
     const now = new Date();
     const isAll = range === 'all';
-    const days = range === '1d' ? 1 : range === '7d' ? 7 : range === '90d' ? 90 : range === '1y' ? 365 : range === '30d' ? 30 : null;
-    const cutoff = days ? new Date(now.getTime() - days * 24 * 60 * 60 * 1000) : null;
+    let cutoff = null;
+    if (range === '1d') {
+      cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+    } else if (range === '7d') {
+      cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    } else if (range === '30d') {
+      cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    } else if (range === '90d') {
+      cutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    } else if (range === '1y') {
+      cutoff = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+    }
 
     const query = search.trim().toLowerCase();
 
@@ -116,9 +130,6 @@ export default function Trades() {
             return false;
           }
           if (!isAll && cutoff && tradeDate < cutoff) {
-            return false;
-          }
-          if (tradeDate > now) {
             return false;
           }
         } else if (!isAll) {
@@ -182,13 +193,49 @@ export default function Trades() {
     }
   }
 
+  async function handleSyncTrades() {
+    setSyncing(true);
+    try {
+      const res = await api.syncAllTrades();
+      if (res?.data && Array.isArray(res.data)) {
+        setTrades(res.data);
+      } else {
+        await loadTrades(false);
+      }
+      const inserted = res?.result?.inserted ?? 0;
+      const updated = res?.result?.updated ?? 0;
+      toast.push(`Broker trade sync complete (${inserted} new added, ${updated} updated)`, 'success');
+    } catch (err) {
+      try {
+        await loadTrades(false);
+        toast.push('Trade history refreshed from database', 'info');
+      } catch {
+        toast.push(err.message || 'Failed to sync trades', 'error');
+      }
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   return (
     <>
-      <div className="page-header">
-        <h1 className="page-title">Trade history</h1>
-        <p className="page-description">
-          Search, filter, and inspect executions saved from your connected broker accounts.
-        </p>
+      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <h1 className="page-title">Trade history</h1>
+          <p className="page-description">
+            Search, filter, and inspect executions saved from your connected broker accounts.
+          </p>
+        </div>
+        <button
+          className="btn btn-secondary"
+          onClick={handleSyncTrades}
+          disabled={syncing || loading}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          title="Sync latest executions from connected broker accounts"
+        >
+          <RefreshCw size={14} className={syncing ? 'spinner-rotate' : ''} />
+          {syncing ? 'Syncing Live Trades…' : 'Sync Live Trades'}
+        </button>
       </div>
 
       {error && (

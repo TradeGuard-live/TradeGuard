@@ -1,4 +1,5 @@
 import axios from "axios";
+import https from "https";
 
 /**
  * DhanAdapter.js
@@ -39,10 +40,14 @@ class DhanAdapter {
             "dhanClientId": this.clientId
         };
 
+        // Explicitly force IPv4 agent so outbound calls match registered static IPv4
+        this.httpsAgent = new https.Agent({ family: 4, keepAlive: true });
+
         this.client = axios.create({
             baseURL: this.baseURL,
-            timeout: 5000,
-            headers: this.headers
+            timeout: 8000,
+            headers: this.headers,
+            httpsAgent: this.httpsAgent
         });
     }
 
@@ -54,18 +59,22 @@ class DhanAdapter {
                 ...options
             });
         } catch (error) {
-            // Check if live rejected the token with DH-906 or auth error, and retry against sandbox
-            const isInvalidToken = 
-                error.response?.data?.errorCode === "DH-906" || 
-                error.response?.status === 400 || 
-                error.response?.status === 401;
+            const status = error.response?.status;
+            const data = error.response?.data;
+            const errorCode = data?.errorCode;
+            const rawMessage = data?.errorMessage || data?.message || data?.errorType || error.message;
 
-            if (isInvalidToken && !options._retriedSandbox) {
+            // Only attempt sandbox fallback if live explicitly rejects with DH-906 (Invalid Token/Session on Live)
+            // NEVER retry sandbox on 400 parameter errors (e.g. DH-905 IP mismatch or invalid input)
+            const isDH906 = errorCode === "DH-906";
+
+            if (isDH906 && !options._retriedSandbox) {
                 try {
                     const sandboxClient = axios.create({
                         baseURL: this.sandboxURL,
-                        timeout: 5000,
-                        headers: this.headers
+                        timeout: 8000,
+                        headers: this.headers,
+                        httpsAgent: this.httpsAgent
                     });
                     const res = await sandboxClient.request({
                         method,
@@ -76,34 +85,31 @@ class DhanAdapter {
                     this.baseURL = this.sandboxURL;
                     this.client = sandboxClient;
                     return res;
-                } catch (sandboxErr) {
-                    if (sandboxErr.response?.data?.errorType || (sandboxErr.response?.status && sandboxErr.response.status !== 401 && sandboxErr.response.status !== 400)) {
-                        this.baseURL = this.sandboxURL;
-                        const sStatus = sandboxErr.response?.status;
-                        const sData = sandboxErr.response?.data;
-                        const sMsg = sData?.errorMessage || sData?.message || sData?.errorType || sandboxErr.message;
-                        const customError = new Error(`Dhan API Error (${sStatus || "Network"}): ${sMsg}`);
-                        customError.status = sStatus;
-                        customError.data = sData;
-                        throw customError;
-                    }
+                } catch {
+                    // Sandbox also failed, proceed to report live error cleanly
                 }
             }
 
-            const status = error.response?.status;
-            const data = error.response?.data;
-            const message = data?.errorMessage || data?.message || data?.errorType || error.message;
+            if (errorCode === "DH-905" || /invalid ip/i.test(rawMessage)) {
+                const ipErr = new Error(`Dhan API Error (400): Static IP mismatch or unverified token. If you recently configured IP whitelisting, generate a fresh Access Token in web.dhan.co and update it in settings.`);
+                ipErr.status = 400;
+                ipErr.data = data;
+                ipErr.errorCode = "DH-905";
+                throw ipErr;
+            }
 
-            if (status === 401 || status === 403 || message?.toLowerCase().includes("unauthorized")) {
-                const err = new Error(`Dhan session invalid or expired: ${message}`);
+            if (status === 401 || status === 403 || errorCode === "DH-906" || /unauthorized|invalid token/i.test(rawMessage)) {
+                const err = new Error(`Dhan API Error (${status || 401}): Invalid or expired access token. Please enter a fresh Dhan Access Token in account settings.`);
                 err.status = status || 401;
                 err.data = data;
+                err.errorCode = errorCode || "DH-906";
                 throw err;
             }
 
-            const customError = new Error(`Dhan API Error (${status || "Network"}): ${message}`);
+            const customError = new Error(`Dhan API Error (${status || "Network"}): ${rawMessage}`);
             customError.status = status;
             customError.data = data;
+            customError.errorCode = errorCode;
             throw customError;
         }
     }
@@ -130,6 +136,26 @@ class DhanAdapter {
             // Fall back to /profile which reliably verifies credentials.
             return await this.getProfile();
         }
+    }
+
+    // --------------------------------------------------
+    // STATIC IP SETUP & DIAGNOSTICS
+    // Endpoint: GET /ip/getIP and POST /ip/setIP
+    // --------------------------------------------------
+    async getIP() {
+        const response = await this._request("GET", "/ip/getIP");
+        return response?.data || {};
+    }
+
+    async setIP({ ip, ipFlag = "PRIMARY" }) {
+        const response = await this._request("POST", "/ip/setIP", {
+            data: {
+                dhanClientId: this.clientId,
+                ip,
+                ipFlag
+            }
+        });
+        return response?.data || {};
     }
 
     // --------------------------------------------------
@@ -286,6 +312,101 @@ class DhanAdapter {
             data: securities
         });
         return response?.data?.data || {};
+    }
+
+    // --------------------------------------------------
+    // PLACE ORDER
+    // Endpoint: POST /orders
+    // --------------------------------------------------
+    async placeOrder({
+        transactionType = "BUY",
+        exchangeSegment = "NSE_EQ",
+        productType = "INTRADAY",
+        orderType = "MARKET",
+        validity = "DAY",
+        securityId,
+        quantity,
+        disclosedQuantity = 0,
+        price = 0,
+        triggerPrice = 0,
+        afterMarketOrder = false,
+        correlationId = ""
+    }) {
+        if (!securityId || !quantity) {
+            throw new Error("securityId and quantity are required for Dhan placeOrder");
+        }
+
+        const payload = {
+            dhanClientId: this.clientId,
+            correlationId: String(correlationId || `TG-${Date.now()}`).slice(0, 25),
+            transactionType: String(transactionType).toUpperCase().startsWith("S") ? "SELL" : "BUY",
+            exchangeSegment: String(exchangeSegment).toUpperCase(),
+            productType: String(productType).toUpperCase() === "DELIVERY" || String(productType).toUpperCase() === "CNC" ? "CNC" : "INTRADAY",
+            orderType: String(orderType).toUpperCase() === "LIMIT" ? "LIMIT" : String(orderType).toUpperCase().startsWith("SL") ? "STOP_LOSS" : "MARKET",
+            validity: String(validity).toUpperCase(),
+            securityId: String(securityId),
+            quantity: Number(quantity),
+            disclosedQuantity: Number(disclosedQuantity || 0),
+            price: Number(price || 0),
+            triggerPrice: Number(triggerPrice || 0),
+            afterMarketOrder: Boolean(afterMarketOrder)
+        };
+
+        const res = await this._request("POST", "/orders", { data: payload });
+        return res?.data || res;
+    }
+
+    // --------------------------------------------------
+    // MODIFY ORDER
+    // Endpoint: PUT /orders/{orderId}
+    // --------------------------------------------------
+    async modifyOrder({
+        orderId,
+        orderType = "LIMIT",
+        quantity,
+        price = 0,
+        triggerPrice = 0,
+        disclosedQuantity = 0,
+        validity = "DAY"
+    }) {
+        if (!orderId || !quantity) {
+            throw new Error("orderId and quantity are required for Dhan modifyOrder");
+        }
+
+        const payload = {
+            dhanClientId: this.clientId,
+            orderId: String(orderId),
+            orderType: String(orderType).toUpperCase(),
+            legName: "",
+            quantity: Number(quantity),
+            price: Number(price || 0),
+            triggerPrice: Number(triggerPrice || 0),
+            disclosedQuantity: Number(disclosedQuantity || 0),
+            validity: String(validity).toUpperCase()
+        };
+
+        const res = await this._request("PUT", `/orders/${orderId}`, { data: payload });
+        return res?.data || res;
+    }
+
+    // --------------------------------------------------
+    // CANCEL ORDER
+    // Endpoint: DELETE /orders/{orderId}
+    // --------------------------------------------------
+    async cancelOrder(orderId) {
+        if (!orderId) throw new Error("orderId is required for Dhan cancelOrder");
+        const res = await this._request("DELETE", `/orders/${orderId}`);
+        return res?.data || res;
+    }
+
+    // --------------------------------------------------
+    // GET ORDER BY ID
+    // Endpoint: GET /orders/{orderId}
+    // --------------------------------------------------
+    async getOrder(orderId) {
+        if (!orderId) throw new Error("orderId is required for Dhan getOrder");
+        const res = await this._request("GET", `/orders/${orderId}`);
+        return res?.data || res;
     }
 }
 

@@ -158,7 +158,9 @@ export default function Overview() {
         const date = new Date(value);
         if (Number.isNaN(date.getTime())) return false;
         if (!isAll && cutoff && date < cutoff) return false;
-        return date <= now;
+        // Prevent dropping recently executed trades due to minor server-client clock differences
+        const maxFutureWindow = new Date(now.getTime() + 10 * 60 * 1000);
+        return date <= maxFutureWindow;
       })
       .sort((a, b) => {
         const dateA = new Date(getTradeDate(a) || 0).getTime();
@@ -296,15 +298,36 @@ export default function Overview() {
 
           <div className="overview-live-item">
             <span className="overview-live-label">Risk Amount (SL)</span>
-            <span className="mono overview-live-val" style={{ color: '#f87171' }}>
-              {formatINR(liveData.portfolioSummary.totalRiskAmount)}
+            <span
+              className="mono overview-live-val"
+              style={{
+                color: liveData.portfolioSummary.totalRiskAmount > 0 ? '#f87171' : 'var(--text-muted)',
+              }}
+            >
+              {liveData.portfolioSummary.totalRiskAmount > 0
+                ? formatINR(liveData.portfolioSummary.totalRiskAmount)
+                : 'Not Set'}
             </span>
           </div>
 
           <div className="overview-live-item">
             <span className="overview-live-label">Live Risk / Reward</span>
-            <span className="mono overview-live-val" style={{ color: '#c4b5fd' }}>
-              {liveData.portfolioSummary.portfolioRiskRewardText || '1:2.0'}
+            <span
+              className="mono overview-live-val"
+              style={{
+                color:
+                  liveData.portfolioSummary.portfolioRiskRewardText &&
+                  liveData.portfolioSummary.portfolioRiskRewardText !== 'Not Set' &&
+                  liveData.portfolioSummary.portfolioRiskRewardText !== '—'
+                    ? '#c4b5fd'
+                    : 'var(--text-muted)',
+              }}
+            >
+              {liveData.portfolioSummary.portfolioRiskRewardText &&
+              liveData.portfolioSummary.portfolioRiskRewardText !== 'Not Set' &&
+              liveData.portfolioSummary.portfolioRiskRewardText !== '—'
+                ? liveData.portfolioSummary.portfolioRiskRewardText
+                : '—'}
             </span>
           </div>
         </div>

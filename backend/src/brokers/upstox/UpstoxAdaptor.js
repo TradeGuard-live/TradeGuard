@@ -14,7 +14,7 @@ class UpstoxAdapter {
 
         this.client = axios.create({
             baseURL: this.baseURL,
-
+            timeout: 10000,
             headers: {
                 Accept: "application/json",
                 Authorization: `Bearer ${this.accessToken}`
@@ -141,31 +141,41 @@ class UpstoxAdapter {
     }
 
 
-        async getPositions() {
-
+        async getPositions(retries = 1) {
         try {
-
             const response = await this.client.get(
                 "/portfolio/short-term-positions"
             );
-
-            return response.data.data || [];
-
+            return response.data?.data || [];
         } catch (error) {
+            const isNetworkError =
+                error.code === "EHOSTUNREACH" ||
+                error.code === "ENETUNREACH" ||
+                error.code === "ECONNRESET" ||
+                error.code === "ETIMEDOUT" ||
+                /EHOSTUNREACH|ENETUNREACH|ECONNRESET|ETIMEDOUT|Network Error/i.test(error.message);
+
+            if (isNetworkError && retries > 0) {
+                console.warn(`[UpstoxAdapter] Transient network notice (${error.code || error.message}), retrying in 600ms...`);
+                await new Promise(r => setTimeout(r, 600));
+                return this.getPositions(retries - 1);
+            }
 
             console.error(
                 "Upstox Positions Error:",
                 error.response?.data || error.message
             );
 
-            throw new Error(
+            const customError = new Error(
                 error.response?.data?.errors?.[0]?.message ||
-                "Failed to fetch positions from Upstox"
+                (isNetworkError ? `Upstox network unreachable (${error.code || error.message})` : "Failed to fetch positions from Upstox")
             );
+            customError.code = error.code;
+            customError.status = error.response?.status;
+            customError.response = error.response;
+            throw customError;
         }
     }
-
 }
-
 
 export default UpstoxAdapter;

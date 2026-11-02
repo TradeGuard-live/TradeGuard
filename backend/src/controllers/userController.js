@@ -28,6 +28,7 @@ export async function login(req, res) {
 
         const orClauses = [
             { email: identifier.toLowerCase() },
+            { email: exactRegex },
             { username: exactRegex }
         ];
 
@@ -42,6 +43,22 @@ export async function login(req, res) {
             const compactEscaped = compact.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             const flexibleChars = compactEscaped.split('').map(c => /[a-zA-Z0-9]/.test(c) ? `${c}[\\s_-]*` : c).join('');
             orClauses.push({ username: new RegExp(`^${flexibleChars}$`, 'i') });
+        }
+
+        // ✅ Gmail dot-invariance & username prefix matching
+        if (identifier.includes('@')) {
+            const [localPart, domain] = identifier.split('@');
+            if (domain && (domain.toLowerCase() === 'gmail.com' || domain.toLowerCase() === 'googlemail.com')) {
+                const dotless = localPart.replace(/\./g, '');
+                const dotPattern = dotless.split('').map(c => /[a-zA-Z0-9]/.test(c) ? `${c}\\.?` : c).join('');
+                orClauses.push({ email: new RegExp(`^${dotPattern}@(gmail|googlemail)\\.com$`, 'i') });
+            }
+        } else {
+            const dotless = identifier.replace(/\./g, '');
+            if (dotless.length >= 3) {
+                const dotPattern = dotless.split('').map(c => /[a-zA-Z0-9]/.test(c) ? `${c}\\.?` : c).join('');
+                orClauses.push({ email: new RegExp(`^${dotPattern}@(gmail|googlemail)\\.com$`, 'i') });
+            }
         }
 
         const user = await User.findOne({ $or: orClauses });
@@ -109,6 +126,14 @@ export async function register(req, res) {
             return res.status(400).json({ message: "User already exists with this email" });
         }
 
+        const cleanUsername = username.trim();
+        const existingUsername = await User.findOne({
+            username: new RegExp(`^${cleanUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+        });
+        if (existingUsername) {
+            return res.status(400).json({ message: "Username is already taken" });
+        }
+
         const lastUser = await User.findOne().sort({ userId: -1 });
         const nextUserId = lastUser && Number.isFinite(lastUser.userId)
             ? lastUser.userId + 1
@@ -116,7 +141,7 @@ export async function register(req, res) {
 
         const newUser = new User({
             userId: nextUserId,
-            username: username.trim(),
+            username: cleanUsername,
             email: normalizedEmail,
             password
         });
@@ -131,7 +156,7 @@ export async function register(req, res) {
 
         return res.status(201).json({
             token,
-            user: { id: newUser._id, username: newUser.username, email: newUser.email }
+            user: { id: newUser._id, userId: newUser._id, username: newUser.username, email: newUser.email }
         });
     } catch (error) {
         return res.status(500).json({ message: "User not created" });
@@ -145,13 +170,30 @@ export async function register(req, res) {
  */
 export async function forgotPassword(req, res) {
     try {
-        const { email } = req.body;
-        if (!email) {
-            return res.status(400).json({ message: "Email is required" });
+        const { email, identifier, username } = req.body;
+        const targetId = String(email || identifier || username || "").trim();
+        if (!targetId) {
+            return res.status(400).json({ message: "Email or username is required" });
         }
 
-        const normalizedEmail = String(email).toLowerCase().trim();
-        const existingUser = await User.findOne({ email: normalizedEmail });
+        const escaped = targetId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const exactRegex = new RegExp(`^${escaped}$`, 'i');
+        const orClauses = [
+            { email: targetId.toLowerCase() },
+            { email: exactRegex },
+            { username: exactRegex }
+        ];
+
+        if (targetId.includes('@')) {
+            const [local, dom] = targetId.split('@');
+            if (dom && (dom.toLowerCase() === 'gmail.com' || dom.toLowerCase() === 'googlemail.com')) {
+                const dotless = local.replace(/\./g, '');
+                const dotPattern = dotless.split('').map(c => /[a-zA-Z0-9]/.test(c) ? `${c}\\.?` : c).join('');
+                orClauses.push({ email: new RegExp(`^${dotPattern}@(gmail|googlemail)\\.com$`, 'i') });
+            }
+        }
+
+        const existingUser = await User.findOne({ $or: orClauses });
 
         // ✅ If user does not exist, return uniform success response (prevents account enumeration)
         if (!existingUser) {
@@ -168,8 +210,10 @@ export async function forgotPassword(req, res) {
         existingUser.resetPasswordExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
         await existingUser.save();
 
-        const resetBaseUrl = process.env.RESET_URL || "http://localhost:3000/reset-password";
-        const resetLink = `${resetBaseUrl}/${rawToken}`;
+        let resetBaseUrl = process.env.RESET_URL || "http://localhost:3000/reset-password";
+        // Clean backend API routes if misconfigured in env
+        resetBaseUrl = resetBaseUrl.replace(/\/api\/users\/reset-password\/?$/, '/reset-password').replace(/\/+$/, '');
+        const resetLink = `${resetBaseUrl}/${rawToken}?token=${rawToken}`;
 
         // Attempt sending email if transporter configured
         try {

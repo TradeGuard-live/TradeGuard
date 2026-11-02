@@ -162,6 +162,26 @@ a {
   min-height: 64px;
 }
 
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--text-primary, inherit);
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+  user-select: none;
+}
+
+.sidebar-brand:hover {
+  opacity: 0.92;
+}
+
+.sidebar-brand:hover .sidebar-logo {
+  box-shadow: 0 0 14px rgba(59, 130, 246, 0.5);
+  transform: scale(1.05);
+}
+
 .sidebar-logo {
   width: 32px;
   height: 32px;
@@ -172,12 +192,14 @@ a {
   justify-content: center;
   flex-shrink: 0;
   color: white;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 .sidebar-title {
   font-weight: 600;
   font-size: 16px;
   white-space: nowrap;
+  color: var(--text-primary, inherit);
 }
 
 .sidebar-nav {
@@ -1079,6 +1101,13 @@ tbody tr:hover {
   justify-content: center;
   margin: 0 auto 20px;
   color: white;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.auth-logo:hover {
+  transform: scale(1.06);
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.45);
 }
 
 .auth-title {

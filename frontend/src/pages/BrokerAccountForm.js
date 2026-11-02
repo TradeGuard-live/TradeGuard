@@ -7,6 +7,34 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { BROKER_META, SUPPORTED_BROKERS } from '../data/mockData';
 
+function SecretField({ name, label, placeholder, value = '', isVisible = false, onToggle, onChange }) {
+  return (
+    <div className="form-group">
+      <label className="form-label" htmlFor={`secret-${name}`}>{label}</label>
+      <div className="input-with-icon">
+        <input
+          id={`secret-${name}`}
+          type={isVisible ? 'text' : 'password'}
+          className="form-input"
+          placeholder={placeholder}
+          value={value}
+          onChange={(e) => onChange(name, e.target.value)}
+          autoComplete="off"
+        />
+        <button
+          type="button"
+          className="input-icon-btn"
+          onClick={() => onToggle(name)}
+          tabIndex={-1}
+          aria-label={isVisible ? `Hide ${label}` : `Show ${label}`}
+        >
+          {isVisible ? <EyeOff size={15} /> : <Eye size={15} />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function BrokerAccountForm() {
   const { id } = useParams();
   const isEdit = !!id;
@@ -32,6 +60,8 @@ export default function BrokerAccountForm() {
   const [fetching, setFetching] = useState(isEdit);
   const [error, setError] = useState('');
 
+  const toggleShow = (name) => setShow((s) => ({ ...s, [name]: !s[name] }));
+
   useEffect(() => {
     if (!isEdit) return;
 
@@ -55,8 +85,10 @@ export default function BrokerAccountForm() {
             refreshToken: '',
             password: '',
             totpSecret: '',
-            mobileNumber: '',
-            tokenExpiresAt: '',
+            mobileNumber: acc.credentials?.mobileNumber || '',
+            tokenExpiresAt: acc.credentials?.tokenExpiresAt
+              ? new Date(acc.credentials.tokenExpiresAt).toISOString().slice(0, 16)
+              : '',
           }));
         }
       } catch (err) {
@@ -128,30 +160,6 @@ export default function BrokerAccountForm() {
     }
   }
 
-  function SecretField({ name, label, placeholder }) {
-    return (
-      <div className="form-group">
-        <label className="form-label">{label}</label>
-        <div className="input-with-icon">
-          <input
-            type={show[name] ? 'text' : 'password'}
-            className="form-input"
-            placeholder={placeholder}
-            value={form[name]}
-            onChange={(e) => update(name, e.target.value)}
-          />
-          <button
-            type="button"
-            className="input-icon-btn"
-            onClick={() => setShow((s) => ({ ...s, [name]: !s[name] }))}
-          >
-            {show[name] ? <EyeOff size={15} /> : <Eye size={15} />}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   if (fetching) {
     return (
       <>
@@ -217,23 +225,6 @@ export default function BrokerAccountForm() {
             </div>
           )}
 
-          {/* ✅ Kotak Neo is deprecated: Notice for existing legacy accounts */}
-          {form.broker === 'KOTAK_NEO' && (
-            <div style={{
-              background: 'rgba(239, 68, 68, 0.08)',
-              border: '1px solid rgba(239, 68, 68, 0.25)',
-              borderRadius: 8,
-              padding: '12px 16px',
-              marginBottom: 16,
-              fontSize: '0.875rem',
-              color: '#ef4444'
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>Notice: Kotak Neo Integration Deprecated</div>
-              <p style={{ margin: 0, fontSize: '0.8125rem' }}>
-                Kotak Neo active integration has been sunset. Historical trade records are preserved for calculation and reporting. For active trading and live market data, please connect Upstox, Dhan, or Angel One.
-              </p>
-            </div>
-          )}
 
           {/* ✅ Groww Trade API Setup Guide */}
           {form.broker === 'GROWW' && (
@@ -313,21 +304,37 @@ export default function BrokerAccountForm() {
                 name="apiKey" 
                 label="SmartAPI API Key *" 
                 placeholder="Paste API Key from SmartAPI App (X-PrivateKey)" 
+                value={form.apiKey}
+                isVisible={!!show.apiKey}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="password" 
                 label="Trading PIN / MPIN *" 
                 placeholder="4-digit trading PIN or account password" 
+                value={form.password}
+                isVisible={!!show.password}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="totpSecret" 
                 label="TOTP Secret Key (from QR Code setup page) *" 
                 placeholder="Alphanumeric secret key under the QR code (e.g. JBSWY3...)" 
+                value={form.totpSecret}
+                isVisible={!!show.totpSecret}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="accessToken" 
                 label="Access Token (Optional - generated automatically from PIN & TOTP Key)" 
                 placeholder="Optional manual JWT Bearer Token (starts with eyJ...)" 
+                value={form.accessToken}
+                isVisible={!!show.accessToken}
+                onToggle={toggleShow}
+                onChange={update}
               />
             </>
           )}
@@ -358,10 +365,15 @@ export default function BrokerAccountForm() {
                 name="apiKey" 
                 label="Neo API Access Token (from API Dashboard) *" 
                 placeholder="Paste API token from TradeAPI Dashboard (e.g. ec6a746c-...)" 
+                value={form.apiKey}
+                isVisible={!!show.apiKey}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <div className="form-group">
-                <label className="form-label">Registered Mobile Number *</label>
+                <label className="form-label" htmlFor="field-mobileNumber">Registered Mobile Number *</label>
                 <input
+                  id="field-mobileNumber"
                   type="text"
                   className="form-input"
                   placeholder="e.g. +919876543210 or 10-digit mobile"
@@ -373,16 +385,28 @@ export default function BrokerAccountForm() {
                 name="password" 
                 label="6-Digit Trading MPIN *" 
                 placeholder="Your 6-digit MPIN used for trading in Neo app" 
+                value={form.password}
+                isVisible={!!show.password}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="totpSecret" 
                 label="TOTP Secret Key (from QR Setup) OR Current 6-digit Authenticator Code *" 
                 placeholder="Enter Base32 Secret Key for 24/7 auto-login OR enter your current 6-digit TOTP code" 
+                value={form.totpSecret}
+                isVisible={!!show.totpSecret}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="accessToken" 
                 label="Trading Session Token (Optional - generated automatically via MPIN & TOTP)" 
                 placeholder="Optional manual Trading Token (starts with eyJ...)" 
+                value={form.accessToken}
+                isVisible={!!show.accessToken}
+                onToggle={toggleShow}
+                onChange={update}
               />
             </>
           )}
@@ -408,6 +432,10 @@ export default function BrokerAccountForm() {
                   ? 'Paste 32-character Kite Access Token (optional if Request Token provided)'
                   : 'Paste Upstox Bearer access token'
               } 
+              value={form.accessToken}
+              isVisible={!!show.accessToken}
+              onToggle={toggleShow}
+              onChange={update}
             />
           )}
 
@@ -417,16 +445,28 @@ export default function BrokerAccountForm() {
                 name="apiKey" 
                 label="Zerodha Kite API Key *" 
                 placeholder="Paste API Key from kite.trade developer console" 
+                value={form.apiKey}
+                isVisible={!!show.apiKey}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="apiSecret" 
                 label="Zerodha Kite API Secret" 
                 placeholder="Paste API Secret from kite.trade developer console" 
+                value={form.apiSecret}
+                isVisible={!!show.apiSecret}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="totpSecret" 
                 label="Request Token (from login redirect URL)" 
                 placeholder="Paste request_token received after logging in at kite.zerodha.com/connect/login" 
+                value={form.totpSecret}
+                isVisible={!!show.totpSecret}
+                onToggle={toggleShow}
+                onChange={update}
               />
             </>
           )}
@@ -437,11 +477,19 @@ export default function BrokerAccountForm() {
                 name="apiKey" 
                 label="Groww API Key (for Automated Token Exchange)" 
                 placeholder="Paste API Key from Groww Cloud API Keys page" 
+                value={form.apiKey}
+                isVisible={!!show.apiKey}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="apiSecret" 
                 label="Groww API Secret (for SHA-256 Checksum)" 
                 placeholder="Paste API Secret from Groww Cloud API Keys page" 
+                value={form.apiSecret}
+                isVisible={!!show.apiSecret}
+                onToggle={toggleShow}
+                onChange={update}
               />
             </>
           )}
@@ -452,16 +500,28 @@ export default function BrokerAccountForm() {
                 name="apiKey" 
                 label="API Key (Optional)" 
                 placeholder="Optional" 
+                value={form.apiKey}
+                isVisible={!!show.apiKey}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="apiSecret" 
                 label="API Secret (Optional)" 
                 placeholder="Optional" 
+                value={form.apiSecret}
+                isVisible={!!show.apiSecret}
+                onToggle={toggleShow}
+                onChange={update}
               />
               <SecretField 
                 name="refreshToken" 
                 label="Refresh Token (Optional)" 
                 placeholder="Optional" 
+                value={form.refreshToken}
+                isVisible={!!show.refreshToken}
+                onToggle={toggleShow}
+                onChange={update}
               />
             </>
           )}

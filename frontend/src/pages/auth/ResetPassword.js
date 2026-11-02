@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useSearchParams, useNavigate } from 'react-router-dom';
+import { Link, useSearchParams, useParams, useNavigate } from 'react-router-dom';
 import { Shield, CheckCircle2 } from 'lucide-react';
 import { api } from '../../api/client';
 
 export default function ResetPassword() {
   const [params] = useSearchParams();
+  const { token: pathToken } = useParams();
   const navigate = useNavigate();
   const [token, setToken] = useState('');
   const [password, setPassword] = useState('');
@@ -14,9 +15,9 @@ export default function ResetPassword() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const t = params.get('token') || params.get('resetToken') || '';
+    const t = pathToken || params.get('token') || params.get('resetToken') || '';
     if (t) setToken(t);
-  }, [params]);
+  }, [params, pathToken]);
 
   async function onSubmit(e) {
     e.preventDefault();
@@ -54,9 +55,11 @@ export default function ResetPassword() {
   return (
     <div className="auth-container">
       <div className="auth-card">
-        <div className="auth-logo">
-          <Shield size={24} />
-        </div>
+        <Link to="/" style={{ display: 'block', textDecoration: 'none' }} title="TradeGuard Home">
+          <div className="auth-logo">
+            <Shield size={24} />
+          </div>
+        </Link>
         <h1 className="auth-title">Reset password</h1>
         <p className="auth-subtitle">Choose a new password for your account</p>
 

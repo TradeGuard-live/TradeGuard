@@ -28,6 +28,7 @@ export class MarketDataEngine {
     constructor() {
         this.subscribers = new Map();   // userId -> Set of instrument tokens
         this.listeners = new Set();     // Callbacks: (userId, instrumentKey, ltp, quoteObj) => void
+        this.pollers = new Map();       // userId -> setInterval ID
     }
 
     /**
@@ -78,18 +79,42 @@ export class MarketDataEngine {
             const key = upstoxInstrumentService.resolveInstrumentKey(p) || p.instrumentToken || p.symbol;
             if (key) {
                 instrumentKeys.push(key);
+                if (p.instrumentToken && !instrumentKeys.includes(p.instrumentToken)) {
+                    instrumentKeys.push(p.instrumentToken);
+                }
+                if (p.securityId && !instrumentKeys.includes(`${p.exchange || "NSE"}_EQ|${p.securityId}`)) {
+                    instrumentKeys.push(`${p.exchange || "NSE"}_EQ|${p.securityId}`);
+                }
+
                 // Pre-populate quote cache with existing position broker prices if available
                 const existingLtp = Number(p.lastBrokerPrice || p.lastPrice || 0);
                 if (quoteCache.isValidPrice(existingLtp)) {
-                    quoteCache.updateQuote({
+                    const quoteRecord = {
                         instrumentKey: key,
                         symbol: p.symbol,
                         exchange: p.exchange || "NSE",
                         segment: p.segment || "EQUITY",
                         lastPrice: existingLtp,
-                        source: "BROKER_POSITION",
+                        source: p.broker ? `${p.broker}_POSITION` : "BROKER_POSITION",
                         lastPriceAt: Date.now()
-                    });
+                    };
+                    quoteCache.updateQuote(quoteRecord);
+                    if (p.symbol) {
+                        quoteCache.updateQuote({ ...quoteRecord, instrumentKey: p.symbol });
+                    }
+                    if (p.instrumentToken && p.instrumentToken !== key) {
+                        quoteCache.updateQuote({ ...quoteRecord, instrumentKey: p.instrumentToken });
+                    }
+                    if (p.securityId) {
+                        quoteCache.updateQuote({ ...quoteRecord, instrumentKey: `${p.exchange || "NSE"}_EQ|${p.securityId}` });
+                    }
+
+                    // Dispatch immediately to registered listeners
+                    this.notify(uId, key, existingLtp, quoteRecord);
+                    if (p.symbol) this.notify(uId, p.symbol, existingLtp, quoteRecord);
+                    if (p.instrumentToken && p.instrumentToken !== key) {
+                        this.notify(uId, p.instrumentToken, existingLtp, quoteRecord);
+                    }
                 }
             }
         });
@@ -114,26 +139,86 @@ export class MarketDataEngine {
                     if (q.symbol) this.notify(uId, q.symbol, q.lastPrice, q);
                 }
 
-                // If regular trading market session is open, connect live WebSocket feed
+                // Check session: only connect live WebSocket and rapid polling during active market hours
                 const session = getMarketSession("NSE", "EQUITY");
                 if (session.isOpen) {
-                    await upstoxMarketDataService.start(
-                        uId,
-                        upstoxToken,
-                        instrumentKeys,
-                        (key, ltp, quoteObj) => {
-                            this.notify(uId, key, ltp, quoteObj);
-                        }
-                    );
+                    // Connect live WebSocket feed for streaming updates
+                    try {
+                        await upstoxMarketDataService.start(
+                            uId,
+                            upstoxToken,
+                            instrumentKeys,
+                            (key, ltp, quoteObj) => {
+                                this.notify(uId, key, ltp, quoteObj);
+                            }
+                        );
+                    } catch (sErr) {
+                        console.warn("[MarketDataEngine] Upstox WebSocket streamer notice:", sErr.message);
+                    }
+
+                    // Periodic REST quote polling (every 3 seconds) as a robust real-time fallback
+                    if (instrumentKeys.length > 0) {
+                        const pollTimer = setInterval(async () => {
+                            if (!this.subscribers.has(uId)) {
+                                clearInterval(pollTimer);
+                                return;
+                            }
+
+                            // Auto-stop polling if market has closed
+                            const currentSession = getMarketSession("NSE", "EQUITY");
+                            if (!currentSession.isOpen) {
+                                console.log(`[MarketDataEngine] Market closed (${currentSession.session}). Stopping rapid polling and live stream for user ${uId}.`);
+                                clearInterval(pollTimer);
+                                this.pollers.delete(uId);
+                                await this.stop(uId);
+                                return;
+                            }
+
+                            try {
+                                const currentSubs = Array.from(this.subscribers.get(uId) || []);
+                                if (currentSubs.length > 0) {
+                                    const quotes = await upstoxMarketDataService.fetchQuotesRest(upstoxToken, currentSubs);
+                                    for (const [key, q] of quotes.entries()) {
+                                        this.notify(uId, key, q.lastPrice, q);
+                                        if (q.symbol) this.notify(uId, q.symbol, q.lastPrice, q);
+                                    }
+                                }
+                            } catch (pErr) {
+                                // ignore poll interval error
+                            }
+                        }, 3000);
+                        this.pollers.set(uId, pollTimer);
+                    }
                 } else {
-                    console.log(`[MarketDataEngine] Indian market is currently ${session.session} (${session.message}). Holding steady closing quotes.`);
+                    console.log(`[MarketDataEngine] Indian market is closed (${session.message || session.session}). Preserved official closing quotes via REST; WebSocket streaming and rapid polling paused.`);
                 }
             } catch (err) {
                 console.warn("[MarketDataEngine] Upstox market data notice:", err.message);
             }
         }
 
-        // 2. Dhan Market Data
+        // 2. Dhan Market Data Snapshot (REST / Live Positions)
+        if (dhanToken && dhanClientId) {
+            try {
+                const dhanQuotes = await dhanMarketData.fetchQuotesRest(dhanClientId, dhanToken, instrumentKeys);
+                for (const [key, q] of dhanQuotes.entries()) {
+                    quoteCache.updateQuote(q);
+                    this.notify(uId, key, q.lastPrice, q);
+                    if (q.symbol) this.notify(uId, q.symbol, q.lastPrice, q);
+                    if (q.securityId) this.notify(uId, `${q.exchange || "NSE"}_EQ|${q.securityId}`, q.lastPrice, q);
+                }
+            } catch (dErr) {
+                console.warn("[MarketDataEngine] Dhan quotes snapshot notice:", dErr.message);
+            }
+        }
+
+        // Check if market is closed before starting other broker feeds
+        const session = getMarketSession("NSE", "EQUITY");
+        if (!session.isOpen) {
+            return;
+        }
+
+        // 3. Dhan Market Data Streaming / Polling (during active market hours)
         if (dhanToken && dhanClientId) {
             try {
                 await dhanMarketData.start(
@@ -142,11 +227,22 @@ export class MarketDataEngine {
                     dhanToken,
                     instrumentKeys,
                     (tick) => {
+                        const quoteObj = {
+                            source: tick.source || "DHAN_TICKER",
+                            lastPriceAt: tick.ltt ? Number(tick.ltt) : Date.now(),
+                            sessionOpen: tick.open ? Number(tick.open) : undefined,
+                            sessionHigh: tick.high ? Number(tick.high) : undefined,
+                            sessionLow: tick.low ? Number(tick.low) : undefined,
+                            previousClose: tick.close ? Number(tick.close) : undefined
+                        };
                         if (tick?.instrumentKey && quoteCache.isValidPrice(tick.ltp)) {
-                            this.notify(uId, tick.instrumentKey, Number(tick.ltp));
+                            this.notify(uId, tick.instrumentKey, Number(tick.ltp), quoteObj);
                         }
                         if (tick?.symbol && quoteCache.isValidPrice(tick.ltp)) {
-                            this.notify(uId, tick.symbol, Number(tick.ltp));
+                            this.notify(uId, tick.symbol, Number(tick.ltp), quoteObj);
+                        }
+                        if (tick?.securityId && quoteCache.isValidPrice(tick.ltp)) {
+                            this.notify(uId, `NSE_EQ|${tick.securityId}`, Number(tick.ltp), quoteObj);
                         }
                     }
                 );
@@ -164,11 +260,15 @@ export class MarketDataEngine {
                     angelToken,
                     instrumentKeys,
                     (tick) => {
+                        const quoteObj = {
+                            source: "ANGEL_ONE_WS",
+                            lastPriceAt: tick.ltt ? Number(tick.ltt) : Date.now()
+                        };
                         if (tick?.instrumentKey && quoteCache.isValidPrice(tick.ltp)) {
-                            this.notify(uId, tick.instrumentKey, Number(tick.ltp));
+                            this.notify(uId, tick.instrumentKey, Number(tick.ltp), quoteObj);
                         }
                         if (tick?.symbol && quoteCache.isValidPrice(tick.ltp)) {
-                            this.notify(uId, tick.symbol, Number(tick.ltp));
+                            this.notify(uId, tick.symbol, Number(tick.ltp), quoteObj);
                         }
                     }
                 );
@@ -186,6 +286,11 @@ export class MarketDataEngine {
     async stop(userId) {
         if (!userId) return;
         const uId = String(userId);
+
+        if (this.pollers.has(uId)) {
+            clearInterval(this.pollers.get(uId));
+            this.pollers.delete(uId);
+        }
 
         try {
             await upstoxMarketDataService.stop(uId);

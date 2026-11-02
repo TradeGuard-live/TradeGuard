@@ -5,6 +5,7 @@ import { getMarketSessionInfo, isIndianMarketOpen } from "../src/services/market
 import upstoxInstrumentService from "../src/services/marketData/upstoxInstrumentService.js";
 import positionEngine from "../src/services/position/PositionEngine.js";
 import pnlEngine from "../src/services/pnl/PnLEngine.js";
+import upstoxMarketDataService from "../src/brokers/upstox/UpstoxMarketDataService.js";
 import { encrypt, decrypt } from "../src/utils/encryption.js";
 import CryptoJS from "crypto-js";
 import crypto from "crypto";
@@ -155,6 +156,33 @@ test("MarketData 7: Average entry price is never overwritten by quote updates", 
     assert.equal(pos.investedCapital, 28000.00, "Invested capital calculated from entry price: 10 * 2800");
     assert.equal(pos.marketValue, 29500.00, "Market value calculated from LTP: 10 * 2950");
     assert.equal(pos.grossPnL, 1500.00, "Unrealized gross PnL: (2950 - 2800) * 10 = 1500");
+});
+
+test("MarketData 8: Post-market close (after 15:30 IST) gracefully skips WebSocket streamer and prevents reconnect loops", async () => {
+    // 15:39 IST is POST_CLOSE
+    const postCloseDate = new Date("2026-10-30T15:39:00.000+05:30");
+    const session = getMarketSessionInfo("NSE", "EQUITY", postCloseDate);
+    assert.equal(session.isOpen, false, "Market must be reported as not open at 15:39 IST");
+    assert.equal(session.session, "POST_CLOSE", "Session should be POST_CLOSE");
+
+    // Mock streamer stop and verify autoReconnect(false) is called
+    let autoReconnectDisabled = false;
+    let disconnected = false;
+    const mockStreamer = {
+        autoReconnect: (flag) => {
+            if (flag === false) autoReconnectDisabled = true;
+        },
+        disconnect: () => {
+            disconnected = true;
+        }
+    };
+
+    upstoxMarketDataService.streamers.set("mock_user_close_test", mockStreamer);
+    await upstoxMarketDataService.stop("mock_user_close_test");
+
+    assert.equal(autoReconnectDisabled, true, "stop() must explicitly disable autoReconnect to prevent infinite reconnect loop");
+    assert.equal(disconnected, true, "stop() must disconnect active streamer");
+    assert.equal(upstoxMarketDataService.streamers.has("mock_user_close_test"), false, "Streamer must be cleared from map");
 });
 
 // ==========================================
@@ -443,6 +471,24 @@ test("Security 4: Username resolution matches exact, case variations, and whites
             orClauses.push((u) => flexRegex.test(u.username));
         }
 
+        // Gmail dot-invariance & prefix matching
+        if (id.includes('@')) {
+            const [localPart, domain] = id.split('@');
+            if (domain && (domain.toLowerCase() === 'gmail.com' || domain.toLowerCase() === 'googlemail.com')) {
+                const dotless = localPart.replace(/\./g, '');
+                const dotPattern = dotless.split('').map(c => /[a-zA-Z0-9]/.test(c) ? `${c}\\.?` : c).join('');
+                const gRegex = new RegExp(`^${dotPattern}@(gmail|googlemail)\\.com$`, 'i');
+                orClauses.push((u) => gRegex.test(u.email));
+            }
+        } else {
+            const dotless = id.replace(/\./g, '');
+            if (dotless.length >= 3) {
+                const dotPattern = dotless.split('').map(c => /[a-zA-Z0-9]/.test(c) ? `${c}\\.?` : c).join('');
+                const gRegex = new RegExp(`^${dotPattern}@(gmail|googlemail)\\.com$`, 'i');
+                orClauses.push((u) => gRegex.test(u.email));
+            }
+        }
+
         return orClauses.some(fn => fn(dbRecord));
     }
 
@@ -456,12 +502,25 @@ test("Security 4: Username resolution matches exact, case variations, and whites
     assert.equal(matchUser("nexus-pro"), true, "Dash separator match");
     assert.equal(matchUser("  Nexus   Pro  "), true, "Trimmed multiple whitespace match");
     assert.equal(matchUser("namansha.1112@gmail.com"), true, "Email match");
-    assert.equal(matchUser("NAMANSHA.1112@GMAIL.COM"), true, "Uppercase email match");
+    assert.equal(matchUser("namansha1112@gmail.com"), true, "Gmail dot-invariant match (without dot)");
+    assert.equal(matchUser("NAMANSHA1112@GMAIL.COM"), true, "Uppercase email without dot match");
+    assert.equal(matchUser("namansha.1112"), true, "Email username prefix with dot match");
+    assert.equal(matchUser("namansha1112"), true, "Email username prefix without dot match");
 
     // ✅ Negative cases: must NOT match
     assert.equal(matchUser("nexus"), false, "Partial prefix match must be rejected");
     assert.equal(matchUser("pro"), false, "Partial suffix match must be rejected");
     assert.equal(matchUser("another_user"), false, "Different user must be rejected");
     assert.equal(matchUser(""), false, "Empty identifier must be rejected");
+});
+
+test("Security 5: TradeRecord model schema validates GROWW and ZERODHA brokers", async () => {
+    const TradeRecord = (await import("../src/models/TradeRecord.js")).default;
+    const allowedBrokers = TradeRecord.schema.path("broker").enumValues;
+    assert.ok(allowedBrokers.includes("GROWW"), "TradeRecord must allow GROWW");
+    assert.ok(allowedBrokers.includes("ZERODHA"), "TradeRecord must allow ZERODHA");
+    assert.ok(allowedBrokers.includes("UPSTOX"), "TradeRecord must allow UPSTOX");
+    assert.ok(allowedBrokers.includes("ANGEL_ONE"), "TradeRecord must allow ANGEL_ONE");
+    assert.ok(allowedBrokers.includes("DHAN"), "TradeRecord must allow DHAN");
 });
 

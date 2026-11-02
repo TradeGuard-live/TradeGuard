@@ -1,3 +1,8 @@
+import dns from 'dns';
+if (dns && typeof dns.setDefaultResultOrder === 'function') {
+    dns.setDefaultResultOrder('ipv4first');
+}
+
 import crypto from 'crypto';
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.getRandomValues) {
     globalThis.crypto = crypto.webcrypto || crypto;
@@ -6,6 +11,15 @@ if (typeof global.crypto === 'undefined' || !global.crypto.getRandomValues) {
     global.crypto = crypto.webcrypto || crypto;
 }
 
+// ✅ Prevent unhandled 3rd-party SDK exceptions or WebSocket connection rejections from crashing the server
+process.on('unhandledRejection', (reason) => {
+    console.warn('[Server] Unhandled Promise Rejection intercepted:', reason?.message || reason);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('[Server] Uncaught Exception intercepted:', err?.message || err);
+});
+
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -13,6 +27,7 @@ import userRoutes from './routes/userRoutes.js';
 import brokerAccountRoutes from './routes/brokerAccountRoutes.js';
 import tradeRoutes from './routes/tradeRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
+import copyTradingRoutes from './routes/copyTradingRoutes.js';
 
 import express from 'express';
 import { connectDB } from './config/db.js';
@@ -69,10 +84,18 @@ app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 // Routes
 // --------------------
 
+app.get("/", (req, res) => {
+    res.json({
+        status: "ok",
+        message: "TradeGuard API is running"
+    });
+});
+
 app.use("/api/users", userRoutes);
 app.use("/api/broker-accounts", brokerAccountRoutes);
 app.use("/api/trades", tradeRoutes);
 app.use("/api/webhooks", webhookRoutes);
+app.use("/api/copy-trading", copyTradingRoutes);
 
 // --------------------
 // Centralized Error Handling

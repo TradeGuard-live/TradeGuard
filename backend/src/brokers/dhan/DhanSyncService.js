@@ -2,6 +2,8 @@ import DhanAdapter from "./DhanAdapter.js";
 import { mapDhanTrade } from "./DhanMapper.js";
 import BrokerAccount from "../../models/BrokerAccount.js";
 import TradeRecord from "../../models/TradeRecord.js";
+import CopyConfig from "../../models/CopyConfig.js";
+import { masterOrderEventStream } from "../../services/copyTrading/engine/MasterOrderEventStream.js";
 import { decrypt } from "../../utils/encryption.js";
 
 /**
@@ -10,7 +12,8 @@ import { decrypt } from "../../utils/encryption.js";
 const syncDhanHistoricalTrades = async ({
     brokerAccountId,
     startDate,
-    endDate
+    endDate,
+    isTodaySync = false
 }) => {
     if (!brokerAccountId) {
         throw new Error("brokerAccountId is required");
@@ -54,34 +57,72 @@ const syncDhanHistoricalTrades = async ({
         accessToken
     });
 
-    const now = new Date();
-    const curFY = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-    const defaultStart = `${curFY - 1}-04-01`;
-    const defaultEnd = now.toISOString().split("T")[0];
-
-    const start = startDate || defaultStart;
-    const end = endDate || defaultEnd;
-
-    console.log(`[Dhan Sync] Fetching trades for account ${brokerAccountId} (${start} - ${end})`);
-
     let trades = [];
 
-    // Fetch historical trades using the financial year / specified date range
-    try {
-        trades = await dhan.getAllHistoricalTrades({ startDate: start, endDate: end });
-    } catch (histError) {
-        console.warn("[Dhan Sync] Historical trades error, attempting today trades fallback:", histError.message);
-        trades = await dhan.getTrades();
-    }
-
-    // Also fetch today's trade book to ensure executions from the current session are captured
-    try {
-        const todayTrades = await dhan.getTrades();
-        if (Array.isArray(todayTrades) && todayTrades.length > 0) {
-            trades.push(...todayTrades);
+    if (isTodaySync) {
+        // Real-time / today sync: Query today's active trade book directly
+        try {
+            trades = await dhan.getTrades();
+        } catch (tErr) {
+            const isTodayAuth = tErr.status === 401 || tErr.status === 403 || /401|403|token|unauthorized|expired|invalid/i.test(tErr.message);
+            if (isTodayAuth) {
+                brokerAccount.isConnected = false;
+                brokerAccount.verificationError = tErr.message;
+                await brokerAccount.save().catch(() => {});
+            }
+            throw tErr;
         }
-    } catch (tErr) {
-        // Today trades fetch optional if already retrieved
+    } else {
+        const now = new Date();
+        const curFY = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+        const defaultStart = `${curFY - 1}-04-01`;
+        const defaultEnd = now.toISOString().split("T")[0];
+
+        const start = startDate || defaultStart;
+        const end = endDate || defaultEnd;
+
+        console.log(`[Dhan Sync] Fetching trades for account ${brokerAccountId} (${start} - ${end})`);
+
+        // Fetch historical trades using the financial year / specified date range
+        try {
+            trades = await dhan.getAllHistoricalTrades({ startDate: start, endDate: end });
+        } catch (histError) {
+            const isAuthError = histError.status === 401 || histError.status === 403 || /401|403|token|unauthorized|expired|invalid/i.test(histError.message);
+            if (isAuthError) {
+                brokerAccount.isConnected = false;
+                brokerAccount.verificationError = histError.message;
+                await brokerAccount.save().catch(() => {});
+                throw histError;
+            }
+            console.warn("[Dhan Sync] Historical trades error, attempting today trades fallback:", histError.message);
+            try {
+                trades = await dhan.getTrades();
+            } catch (todayErr) {
+                const isTodayAuth = todayErr.status === 401 || todayErr.status === 403 || /401|403|token|unauthorized|expired|invalid/i.test(todayErr.message);
+                if (isTodayAuth) {
+                    brokerAccount.isConnected = false;
+                    brokerAccount.verificationError = todayErr.message;
+                    await brokerAccount.save().catch(() => {});
+                }
+                throw todayErr;
+            }
+        }
+
+        // Also fetch today's trade book to ensure executions from the current session are captured
+        try {
+            const todayTrades = await dhan.getTrades();
+            if (Array.isArray(todayTrades) && todayTrades.length > 0) {
+                trades.push(...todayTrades);
+            }
+        } catch (tErr) {
+            const isTodayAuth = tErr.status === 401 || tErr.status === 403 || /401|403|token|unauthorized|expired|invalid/i.test(tErr.message);
+            if (isTodayAuth) {
+                brokerAccount.isConnected = false;
+                brokerAccount.verificationError = tErr.message;
+                await brokerAccount.save().catch(() => {});
+                throw tErr;
+            }
+        }
     }
 
     if (!Array.isArray(trades)) {
@@ -102,7 +143,9 @@ const syncDhanHistoricalTrades = async ({
     }
     const deduplicatedTrades = Array.from(uniqueMap.values());
 
-    console.log(`[Dhan Sync] Processing ${deduplicatedTrades.length} trades for Dhan account ${brokerAccountId}`);
+    if (!isTodaySync && deduplicatedTrades.length > 0) {
+        console.log(`[Dhan Sync] Processing ${deduplicatedTrades.length} trades for Dhan account ${brokerAccountId}`);
+    }
 
     let inserted = 0;
     let updated = 0;
@@ -120,25 +163,52 @@ const syncDhanHistoricalTrades = async ({
                 continue;
             }
 
-            const result = await TradeRecord.updateOne(
-                {
-                    brokerAccountId: brokerAccount._id,
-                    tradeId: mappedTrade.tradeId
-                },
-                {
-                    $set: mappedTrade
-                },
-                {
-                    upsert: true
-                }
-            );
+            const existing = await TradeRecord.findOne({
+                brokerAccountId: brokerAccount._id,
+                tradeId: mappedTrade.tradeId
+            }).lean();
 
-            if (result.upsertedCount === 1) {
+            if (!existing) {
+                await TradeRecord.create({
+                    ...mappedTrade,
+                    brokerAccountId: brokerAccount._id,
+                    userId: brokerAccount.userId
+                });
                 inserted++;
-            } else if (result.modifiedCount === 1) {
-                updated++;
             } else {
-                skipped++;
+                const hasChanged =
+                    Number(existing.quantity) !== Number(mappedTrade.quantity) ||
+                    Number(existing.executedPrice) !== Number(mappedTrade.executedPrice) ||
+                    String(existing.status || "") !== String(mappedTrade.status || "");
+
+                if (hasChanged) {
+                    await TradeRecord.updateOne(
+                        { _id: existing._id },
+                        { $set: mappedTrade }
+                    );
+                    updated++;
+                } else {
+                    skipped++;
+                }
+            }
+
+            // If this Dhan account is a master account in an active copy config, forward to copy trading engine
+            try {
+                const isMaster = await CopyConfig.exists({
+                    userId: brokerAccount.userId,
+                    masterAccountId: brokerAccount._id,
+                    isEnabled: true,
+                    emergencyStop: false
+                });
+                if (isMaster) {
+                    await masterOrderEventStream.notifyNewMasterTrade({
+                        userId: brokerAccount.userId,
+                        brokerAccountId: brokerAccount._id,
+                        trade: mappedTrade
+                    });
+                }
+            } catch (notifyErr) {
+                console.warn("[Dhan Sync] Failed to notify master trade to copy trading engine:", notifyErr.message);
             }
         } catch (itemError) {
             console.warn("[Dhan Sync] Error processing trade item:", itemError.message);
@@ -146,11 +216,12 @@ const syncDhanHistoricalTrades = async ({
         }
     }
 
-    // Update last sync on broker account
-    brokerAccount.lastSync = new Date();
-    await brokerAccount.save();
-
-    console.log(`[Dhan Sync] Completed: ${inserted} inserted, ${updated} updated, ${skipped} skipped`);
+    // Update last sync on broker account if changes were made or in historical mode
+    if (!isTodaySync || inserted > 0 || updated > 0) {
+        brokerAccount.lastSync = new Date();
+        await brokerAccount.save().catch(() => {});
+        console.log(`[Dhan Sync] Completed: ${inserted} inserted, ${updated} updated, ${skipped} skipped`);
+    }
 
     return {
         inserted,
@@ -161,7 +232,7 @@ const syncDhanHistoricalTrades = async ({
 };
 
 const syncDhanTodayTrades = async ({ brokerAccountId }) => {
-    return syncDhanHistoricalTrades({ brokerAccountId });
+    return syncDhanHistoricalTrades({ brokerAccountId, isTodaySync: true });
 };
 
 export {

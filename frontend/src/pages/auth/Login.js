@@ -32,9 +32,11 @@ export default function Login() {
   return (
     <div className="auth-container">
       <div className="auth-card">
-        <div className="auth-logo">
-          <Shield size={24} />
-        </div>
+        <Link to="/" style={{ display: 'block', textDecoration: 'none' }} title="TradeGuard Home">
+          <div className="auth-logo">
+            <Shield size={24} />
+          </div>
+        </Link>
         <h1 className="auth-title">Welcome back</h1>
         <p className="auth-subtitle">Sign in to TradeGuard to continue</p>
 

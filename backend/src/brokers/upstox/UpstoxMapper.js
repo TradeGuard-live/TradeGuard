@@ -236,21 +236,35 @@ const mapUpstoxPosition = (pos) => {
     const instrumentToken = pos.instrument_token || `${exchange}_EQ|${symbol}`;
     const qty = Number(pos.quantity || 0);
 
+    const avgPrice = Number(pos.average_price ?? pos.buy_price ?? pos.day_buy_price ?? 0);
+    const lastPrice = Number(pos.last_price || 0);
+    const closePrice = Number(pos.close_price || 0);
+
     return {
         // ✅ Normalized Upstox position representation
+        broker: "UPSTOX",
         symbol,
         exchange,
         segment,
         productType,
         instrumentToken,
+        instrument_token: instrumentToken,
+        instrument_key: instrumentToken,
         quantity: qty,
         netQuantity: qty,
-        averagePrice: Number(pos.average_price || pos.buy_price || 0),
-        lastPrice: Number(pos.last_price || 0),
-        closePrice: Number(pos.close_price || 0),
+        averagePrice: avgPrice,
+        average_price: avgPrice,
+        buy_price: avgPrice,
+        lastPrice,
+        last_price: lastPrice,
+        closePrice,
+        close_price: closePrice,
         realizedPnL: Number(pos.realised || 0),
+        realised: Number(pos.realised || 0),
         unrealizedPnL: Number(pos.unrealised || 0),
+        unrealised: Number(pos.unrealised || 0),
         pnl: Number(pos.pnl || 0),
+        product: pos.product || productType,
         brokerResponse: pos
     };
 };

@@ -432,28 +432,35 @@ export class PnLEngine {
             }
 
             const quantity = Number(pos.openQuantity || Math.abs(pos.netQuantity) || 0);
-            const averagePrice = Number(pos.averagePrice || 0);
+            let averagePrice = Number(pos.averagePrice || 0);
+            if (averagePrice <= 0 && pos.lastBrokerPrice && Number(pos.lastBrokerPrice) > 0) {
+                averagePrice = Number(pos.lastBrokerPrice);
+            }
             const side = pos.side === "SELL" || pos.netQuantity < 0 ? "SELL" : "BUY";
             const isLong = side === "BUY";
 
             // Valuation: Invested capital vs dynamic market value
             const investedCapital = round2(averagePrice * quantity);
-            const marketValue = ltp !== null ? round2(ltp * quantity) : null;
+            const marketValue = ltp !== null ? round2(ltp * quantity) : (averagePrice > 0 ? round2(averagePrice * quantity) : null);
 
-            // Gross Unrealized P&L: strictly from valid LTP
+            // Gross Unrealized P&L: strictly from valid LTP and positive average entry price
             let unrealizedGrossPnL = null;
-            if (ltp !== null) {
+            if (ltp !== null && averagePrice > 0) {
                 if (isLong) {
                     unrealizedGrossPnL = round2((ltp - averagePrice) * quantity);
                 } else {
                     unrealizedGrossPnL = round2((averagePrice - ltp) * quantity);
                 }
+            } else if (ltp !== null && averagePrice <= 0) {
+                // Cannot calculate meaningful PnL without a valid entry price
+                unrealizedGrossPnL = 0;
             }
 
-            // Gross Realized P&L: strictly from closed/squared lots
-            const realizedGrossPnL = round2(Number(pos.realizedPnL || 0));
+            // Gross Realized P&L: strictly from closed/squared lots (0 if unsquared)
+            const hasSquaredLots = Array.isArray(pos.squaredLots) && pos.squaredLots.length > 0;
+            const realizedGrossPnL = hasSquaredLots ? round2(Number(pos.realizedPnL || 0)) : 0;
 
-            // Gross P&L (Total)
+            // Gross P&L (Total for this position)
             const grossPnL = unrealizedGrossPnL !== null
                 ? round2(unrealizedGrossPnL + realizedGrossPnL)
                 : realizedGrossPnL;
@@ -494,75 +501,112 @@ export class PnLEngine {
             // Stop Loss & Target Settings
             const savedRisk = userRiskSettings.get(symbol) || {};
 
-            // Default Stop Loss (1.5% from entry if not specified)
-            const defaultStopLoss = isLong
-                ? round2(averagePrice * 0.985)
-                : round2(averagePrice * 1.015);
-            const stopLoss = Number(savedRisk.stopLoss ?? pos.stopLoss ?? defaultStopLoss);
+            // Stop Loss: only if explicitly set by user or provided by broker order
+            const rawSL = savedRisk.stopLoss !== undefined && savedRisk.stopLoss !== null && savedRisk.stopLoss !== ""
+                ? Number(savedRisk.stopLoss)
+                : (pos.stopLoss !== undefined && pos.stopLoss !== null && pos.stopLoss !== "" ? Number(pos.stopLoss) : null);
+            const stopLoss = rawSL && Number.isFinite(rawSL) && rawSL > 0 ? round2(rawSL) : null;
 
-            // Default Target (3.0% from entry for a 1:2 R:R if not specified)
-            const defaultTarget = isLong
-                ? round2(averagePrice * 1.03)
-                : round2(averagePrice * 0.97);
-            const target = Number(savedRisk.target ?? pos.target ?? defaultTarget);
+            // Target: only if explicitly set by user or provided by broker order
+            const rawTarget = savedRisk.target !== undefined && savedRisk.target !== null && savedRisk.target !== ""
+                ? Number(savedRisk.target)
+                : (pos.target !== undefined && pos.target !== null && pos.target !== "" ? Number(pos.target) : null);
+            const target = rawTarget && Number.isFinite(rawTarget) && rawTarget > 0 ? round2(rawTarget) : null;
 
-            // Risk Amount (According to Stop Loss)
+            // Risk Amount: only calculated if Stop Loss is explicitly set
             let riskPerUnit = 0;
-            if (isLong) {
-                riskPerUnit = Math.max(0.01, averagePrice - stopLoss);
-            } else {
-                riskPerUnit = Math.max(0.01, stopLoss - averagePrice);
+            let riskAmount = null;
+            if (stopLoss !== null && averagePrice > 0) {
+                if (isLong) {
+                    riskPerUnit = Math.max(0, averagePrice - stopLoss);
+                } else {
+                    riskPerUnit = Math.max(0, stopLoss - averagePrice);
+                }
+                riskAmount = round2(quantity * riskPerUnit);
             }
-            const riskAmount = round2(quantity * riskPerUnit);
 
-            // Reward Amount
+            // Reward Amount: only calculated if Target is explicitly set
             let rewardPerUnit = 0;
-            if (isLong) {
-                rewardPerUnit = Math.max(0.01, target - averagePrice);
-            } else {
-                rewardPerUnit = Math.max(0.01, averagePrice - target);
+            let rewardAmount = null;
+            if (target !== null && averagePrice > 0) {
+                if (isLong) {
+                    rewardPerUnit = Math.max(0, target - averagePrice);
+                } else {
+                    rewardPerUnit = Math.max(0, averagePrice - target);
+                }
+                rewardAmount = round2(quantity * rewardPerUnit);
             }
-            const rewardAmount = round2(quantity * rewardPerUnit);
 
-            // Initial Risk / Reward Ratio
-            const initialRiskRewardRatio = riskPerUnit > 0
-                ? round2(rewardPerUnit / riskPerUnit)
-                : 1;
+            // Initial Risk / Reward Ratio: only if BOTH Stop Loss and Target are set
+            let initialRiskRewardRatio = null;
+            let initialRiskRewardText = "Not Set";
+            if (stopLoss !== null && target !== null && riskPerUnit > 0) {
+                initialRiskRewardRatio = round2(rewardPerUnit / riskPerUnit);
+                initialRiskRewardText = `1:${initialRiskRewardRatio}`;
+            }
 
             // Live Dynamic Risk / Reward Ratio (as LTP changes)
             const liveLtp = ltp !== null ? ltp : averagePrice;
-            let liveRiskDistance = 0;
-            let liveRewardDistance = 0;
-            let liveRiskRewardRatio = initialRiskRewardRatio;
-            let liveStatus = "IN_PROGRESS";
+            let liveRiskRewardRatio = null;
+            let liveRiskRewardText = "Not Set";
+            let liveStatus = "OPEN";
 
-            if (isLong) {
-                liveRiskDistance = liveLtp - stopLoss;
-                liveRewardDistance = target - liveLtp;
-                if (liveLtp <= stopLoss) {
-                    liveStatus = "SL_TRIGGERED";
-                    liveRiskRewardRatio = 0;
-                } else if (liveLtp >= target) {
-                    liveStatus = "TARGET_REACHED";
-                    liveRiskRewardRatio = round2(rewardPerUnit / riskPerUnit);
+            if (stopLoss !== null && target !== null && riskPerUnit > 0) {
+                let liveRiskDistance = 0;
+                let liveRewardDistance = 0;
+
+                if (isLong) {
+                    liveRiskDistance = liveLtp - stopLoss;
+                    liveRewardDistance = target - liveLtp;
+                    if (liveLtp <= stopLoss) {
+                        liveStatus = "SL_TRIGGERED";
+                        liveRiskRewardRatio = 0;
+                        liveRiskRewardText = "SL Triggered";
+                    } else if (liveLtp >= target) {
+                        liveStatus = "TARGET_REACHED";
+                        liveRiskRewardRatio = initialRiskRewardRatio;
+                        liveRiskRewardText = "Target Hit";
+                    } else {
+                        liveRiskRewardRatio = liveRiskDistance > 0
+                            ? round2(liveRewardDistance / liveRiskDistance)
+                            : 0;
+                        liveRiskRewardText = `1:${liveRiskRewardRatio}`;
+                        liveStatus = "IN_PROGRESS";
+                    }
                 } else {
-                    liveRiskRewardRatio = liveRiskDistance > 0
-                        ? round2(liveRewardDistance / liveRiskDistance)
-                        : 0;
+                    liveRiskDistance = stopLoss - liveLtp;
+                    liveRewardDistance = liveLtp - target;
+                    if (liveLtp >= stopLoss) {
+                        liveStatus = "SL_TRIGGERED";
+                        liveRiskRewardRatio = 0;
+                        liveRiskRewardText = "SL Triggered";
+                    } else if (liveLtp <= target) {
+                        liveStatus = "TARGET_REACHED";
+                        liveRiskRewardRatio = initialRiskRewardRatio;
+                        liveRiskRewardText = "Target Hit";
+                    } else {
+                        liveRiskRewardRatio = liveRiskDistance > 0
+                            ? round2(liveRewardDistance / liveRiskDistance)
+                            : 0;
+                        liveRiskRewardText = `1:${liveRiskRewardRatio}`;
+                        liveStatus = "IN_PROGRESS";
+                    }
                 }
-            } else {
-                liveRiskDistance = stopLoss - liveLtp;
-                liveRewardDistance = liveLtp - target;
-                if (liveLtp >= stopLoss) {
+            } else if (stopLoss !== null) {
+                if ((isLong && liveLtp <= stopLoss) || (!isLong && liveLtp >= stopLoss)) {
                     liveStatus = "SL_TRIGGERED";
-                    liveRiskRewardRatio = 0;
-                } else if (liveLtp <= target) {
-                    liveStatus = "TARGET_REACHED";
-                    liveRiskRewardRatio = round2(rewardPerUnit / riskPerUnit);
+                    liveRiskRewardText = "SL Triggered";
                 } else {
-                    liveRiskRewardRatio = liveRiskDistance > 0
-                        ? round2(liveRewardDistance / liveRiskDistance)
-                        : 0;
+                    liveStatus = "IN_PROGRESS";
+                    liveRiskRewardText = "No Target";
+                }
+            } else if (target !== null) {
+                if ((isLong && liveLtp >= target) || (!isLong && liveLtp <= target)) {
+                    liveStatus = "TARGET_REACHED";
+                    liveRiskRewardText = "Target Hit";
+                } else {
+                    liveStatus = "IN_PROGRESS";
+                    liveRiskRewardText = "No SL";
                 }
             }
 
@@ -571,7 +615,9 @@ export class PnLEngine {
             totalUnrealizedPnL += (unrealizedGrossPnL || 0);
             totalRealizedPnL += realizedGrossPnL;
             totalNetPnL += netPnL;
-            totalRiskAmount += riskAmount;
+            if (riskAmount !== null) {
+                totalRiskAmount += riskAmount;
+            }
 
             combinedPortfolioCharges.brokerage += charges.brokerage;
             combinedPortfolioCharges.stt += charges.stt;
@@ -585,6 +631,10 @@ export class PnLEngine {
 
             return {
                 id: pos.key || `${symbol}_${pos.productType}`,
+                key: pos.key,
+                broker: pos.broker,
+                brokerAccountId: pos.brokerAccountId ? String(pos.brokerAccountId) : undefined,
+                securityId: pos.securityId ? String(pos.securityId) : undefined,
                 symbol,
                 exchange: pos.exchange || "NSE",
                 segment: pos.segment || "EQUITY",
@@ -596,6 +646,8 @@ export class PnLEngine {
                 netQuantity: pos.netQuantity || quantity,
                 averagePrice,
                 averageEntryPrice: averagePrice,
+                entryPrice: averagePrice,
+                executionPrice: averagePrice,
                 investedCapital,
                 marketValue,
                 // ✅ Strictly separated market quote attributes
@@ -632,14 +684,14 @@ export class PnLEngine {
                 // Risk / Reward metrics
                 stopLoss,
                 target,
-                riskPerUnit: round2(riskPerUnit),
-                rewardPerUnit: round2(rewardPerUnit),
+                riskPerUnit: riskPerUnit > 0 ? round2(riskPerUnit) : null,
+                rewardPerUnit: rewardPerUnit > 0 ? round2(rewardPerUnit) : null,
                 riskAmount,
                 rewardAmount,
                 initialRiskRewardRatio,
-                initialRiskRewardText: `1:${initialRiskRewardRatio}`,
+                initialRiskRewardText,
                 liveRiskRewardRatio,
-                liveRiskRewardText: `1:${liveRiskRewardRatio}`,
+                liveRiskRewardText,
                 liveStatus,
                 // Position Engine detailed lots
                 openLots: pos.openLots || [],
@@ -652,9 +704,10 @@ export class PnLEngine {
             combinedPortfolioCharges[k] = round2(combinedPortfolioCharges[k]);
         }
 
-        const avgRR = calculatedPositions.length > 0
-            ? round2(calculatedPositions.reduce((s, p) => s + p.liveRiskRewardRatio, 0) / calculatedPositions.length)
-            : 0;
+        const validRRPositions = calculatedPositions.filter(p => p.liveRiskRewardRatio !== null && p.liveRiskRewardRatio > 0);
+        const avgRR = validRRPositions.length > 0
+            ? round2(validRRPositions.reduce((s, p) => s + p.liveRiskRewardRatio, 0) / validRRPositions.length)
+            : null;
 
         return {
             userId: uId,
@@ -666,7 +719,7 @@ export class PnLEngine {
                 totalNetPnL: round2(totalNetPnL),
                 totalRiskAmount: round2(totalRiskAmount),
                 portfolioRiskReward: avgRR,
-                portfolioRiskRewardText: `1:${avgRR}`,
+                portfolioRiskRewardText: avgRR !== null ? `1:${avgRR}` : "Not Set",
                 totalCharges: combinedPortfolioCharges,
                 openPositionsCount: calculatedPositions.length
             },

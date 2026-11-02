@@ -1,3 +1,11 @@
+import crypto from "crypto";
+if (typeof globalThis.crypto === "undefined" || !globalThis.crypto.randomBytes) {
+    globalThis.crypto = crypto;
+}
+if (typeof global.crypto === "undefined" || !global.crypto.randomBytes) {
+    global.crypto = crypto;
+}
+
 import mongoose from "mongoose";
 
 export const connectDB = async () => {

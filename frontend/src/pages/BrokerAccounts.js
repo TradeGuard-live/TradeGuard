@@ -16,11 +16,11 @@ export default function BrokerAccounts() {
   const [error, setError] = useState('');
   const [syncingId, setSyncingId] = useState(null);
 
-  async function load() {
+  async function load(verify = true) {
     setLoading(true);
     setError('');
     try {
-      const data = await api.listBrokerAccounts(user?.userId);
+      const data = await api.listBrokerAccounts(user?.userId, { verify });
       // handle { data: [...] } or [...]
       const list = Array.isArray(data) ? data : data.data || [];
       setAccounts(list);
@@ -33,7 +33,7 @@ export default function BrokerAccounts() {
   }
 
   useEffect(() => {
-    load();
+    load(true);
     // eslint-disable-next-line
   }, []);
 
@@ -53,9 +53,11 @@ export default function BrokerAccounts() {
       } else {
         toast.push('Sync complete', 'success');
       }
-      await load();
+      await load(false);
     } catch (err) {
       toast.push(err.message || 'Failed to sync trades', 'error');
+      // Always reload so disconnected status and error message immediately reflect on UI
+      await load(false);
     } finally {
       setSyncingId(null);
     }

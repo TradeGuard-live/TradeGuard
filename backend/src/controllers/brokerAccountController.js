@@ -23,12 +23,20 @@ import { decrypt, encrypt } from "../utils/encryption.js";
 export const verifyBrokerCredentials = async (brokerAccount) => {
     if (!brokerAccount) return false;
 
+    // Handle Mock simulation broker
+    if (brokerAccount.broker === "MOCK") {
+        brokerAccount.isConnected = true;
+        brokerAccount.verificationError = null;
+        brokerAccount.lastConnectedAt = new Date();
+        await brokerAccount.save();
+        return true;
+    }
+
     if (brokerAccount.broker === "UPSTOX") {
         if (!brokerAccount.credentials?.accessToken) {
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Upstox access token is missing. Please generate or enter a valid access token.";
+            await brokerAccount.save();
             return false;
         }
 
@@ -40,10 +48,9 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
         }
 
         if (!token) {
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Failed to decrypt Upstox access token.";
+            await brokerAccount.save();
             return false;
         }
 
@@ -53,39 +60,35 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                     Authorization: `Bearer ${token}`,
                     Accept: "application/json"
                 },
-                timeout: 3000
+                timeout: 5000
             });
 
             if (response.status === 200 && response.data?.status === "success") {
-                if (!brokerAccount.isConnected) {
-                    brokerAccount.isConnected = true;
-                    brokerAccount.lastConnectedAt = new Date();
-                    await brokerAccount.save();
-                }
+                brokerAccount.isConnected = true;
+                brokerAccount.verificationError = null;
+                brokerAccount.lastConnectedAt = new Date();
+                await brokerAccount.save();
                 return true;
             } else {
-                if (brokerAccount.isConnected) {
-                    brokerAccount.isConnected = false;
-                    await brokerAccount.save();
-                }
+                brokerAccount.isConnected = false;
+                brokerAccount.verificationError = response.data?.message || "Upstox profile verification failed.";
+                await brokerAccount.save();
                 return false;
             }
         } catch (error) {
-            // Token is invalid/expired (e.g. 401, 403, UDAPI100050)
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            const errMsg = error.response?.data?.message || error.response?.data?.errors?.[0]?.message || error.message;
+            brokerAccount.verificationError = `Upstox API Error: ${errMsg}`;
+            await brokerAccount.save();
             return false;
         }
     }
 
     if (brokerAccount.broker === "DHAN") {
         if (!brokerAccount.credentials?.accessToken || !brokerAccount.credentials?.clientId) {
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Dhan Client ID and Access Token are required.";
+            await brokerAccount.save();
             return false;
         }
 
@@ -97,10 +100,9 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
         }
 
         if (!token) {
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Failed to decrypt Dhan access token.";
+            await brokerAccount.save();
             return false;
         }
 
@@ -111,41 +113,15 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
             });
             await dhan.getFundLimits();
 
-            if (!brokerAccount.isConnected) {
-                brokerAccount.isConnected = true;
-                brokerAccount.lastConnectedAt = new Date();
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = true;
+            brokerAccount.verificationError = null;
+            brokerAccount.lastConnectedAt = new Date();
+            await brokerAccount.save();
             return true;
         } catch (error) {
-            const isAuthError =
-                error.status === 401 ||
-                error.status === 403 ||
-                error.message?.toLowerCase().includes("token") ||
-                error.message?.toLowerCase().includes("unauthorized") ||
-                error.message?.toLowerCase().includes("session");
-
-            if (isAuthError) {
-                if (brokerAccount.isConnected) {
-                    brokerAccount.isConnected = false;
-                    await brokerAccount.save();
-                }
-                return false;
-            }
-
-            if (token && token.length >= 10 && brokerAccount.isActive) {
-                if (!brokerAccount.isConnected) {
-                    brokerAccount.isConnected = true;
-                    brokerAccount.lastConnectedAt = new Date();
-                    await brokerAccount.save();
-                }
-                return true;
-            }
-
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = error.message;
+            await brokerAccount.save();
             return false;
         }
     }
@@ -174,10 +150,9 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
 
         // If no token and not enough credentials to perform login, set disconnected
         if (!token && (!clientCode || !password || (!totpSecret && !apiKey))) {
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Missing required Angel One credentials (Client Code, Password, and API Key / TOTP).";
+            await brokerAccount.save();
             return false;
         }
 
@@ -197,11 +172,10 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                 try {
                     await adapter.getRMS({ noAutoLogin: true });
                     tokenValid = true;
-                    if (!brokerAccount.isConnected) {
-                        brokerAccount.isConnected = true;
-                        brokerAccount.lastConnectedAt = new Date();
-                        await brokerAccount.save();
-                    }
+                    brokerAccount.isConnected = true;
+                    brokerAccount.verificationError = null;
+                    brokerAccount.lastConnectedAt = new Date();
+                    await brokerAccount.save();
                     return true;
                 } catch {
                     // Token expired or invalid, continue below to attempt login if credentials exist
@@ -216,22 +190,21 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                     if (adapter.refreshToken) brokerAccount.credentials.refreshToken = adapter.refreshToken;
                     if (adapter.feedToken) brokerAccount.credentials.feedToken = adapter.feedToken;
                     brokerAccount.isConnected = true;
+                    brokerAccount.verificationError = null;
                     brokerAccount.lastConnectedAt = new Date();
                     await brokerAccount.save();
                     return true;
                 }
             }
 
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Angel One session is expired or credentials are invalid.";
+            await brokerAccount.save();
             return false;
         } catch (error) {
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = error.message;
+            await brokerAccount.save();
             return false;
         }
     }
@@ -262,10 +235,9 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
 
         // If no token and not enough credentials to perform login, set disconnected
         if (!token && (!clientCode || !password || !mobileNumber || (!totpSecret && !apiKey))) {
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Missing required credentials for Kotak Neo login (Client ID, Password, Mobile, TOTP/API Key).";
+            await brokerAccount.save();
             return false;
         }
 
@@ -287,11 +259,10 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                 try {
                     await adapter.getFundLimits({ noAutoLogin: true });
                     tokenValid = true;
-                    if (!brokerAccount.isConnected) {
-                        brokerAccount.isConnected = true;
-                        brokerAccount.lastConnectedAt = new Date();
-                        await brokerAccount.save();
-                    }
+                    brokerAccount.isConnected = true;
+                    brokerAccount.verificationError = null;
+                    brokerAccount.lastConnectedAt = new Date();
+                    await brokerAccount.save();
                     return true;
                 } catch (tErr) {
                     // Token expired, continue to login attempt below
@@ -299,36 +270,47 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                 }
             }
 
-            // Attempt login once if credentials are present and token was not valid
+            // Attempt login if credentials are present and token was not valid
             if (!tokenValid && clientCode && password && mobileNumber && (totpSecret || apiKey)) {
-                await adapter.login();
-                if (adapter.tradingToken) {
-                    brokerAccount.credentials.accessToken = adapter.tradingToken;
-                    if (adapter.tradingSid) brokerAccount.credentials.sid = adapter.tradingSid;
-                    if (adapter.baseUrl) brokerAccount.credentials.baseUrl = adapter.baseUrl;
-                    brokerAccount.isConnected = true;
-                    brokerAccount.lastConnectedAt = new Date();
+                try {
+                    await adapter.login();
+                    if (adapter.tradingToken) {
+                        brokerAccount.credentials.accessToken = adapter.tradingToken;
+                        if (adapter.tradingSid) brokerAccount.credentials.sid = adapter.tradingSid;
+                        if (adapter.baseUrl) brokerAccount.credentials.baseUrl = adapter.baseUrl;
+                        brokerAccount.isConnected = true;
+                        brokerAccount.verificationError = null;
+                        brokerAccount.lastConnectedAt = new Date();
+                        await brokerAccount.save();
+                        return true;
+                    }
+                } catch (loginErr) {
+                    console.warn("[Kotak Neo] Login failed:", loginErr.message);
+                    const isStaticOtp = totpSecret && /^\d{6}$/.test(String(totpSecret).trim());
+                    brokerAccount.isConnected = false;
+                    if (isStaticOtp && (loginErr.message.includes("10506") || /totp|otp|expired|invalid/i.test(loginErr.message))) {
+                        brokerAccount.verificationError = "Kotak Neo login failed: The 6-digit TOTP code from Google Authenticator has expired or is invalid. Please enter a fresh 6-digit code from your app, or use your permanent Base32 Setup Secret Key.";
+                    } else {
+                        brokerAccount.verificationError = loginErr.message;
+                    }
                     await brokerAccount.save();
-                    return true;
+                    return false;
                 }
             }
 
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
-            brokerAccount._verificationError = "Missing required credentials for Kotak Neo login (Client ID, MPIN, Mobile, and TOTP Key / Neo API Token).";
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Missing required credentials for Kotak Neo login (Client ID, MPIN, Mobile, and TOTP code / Neo API Token).";
+            await brokerAccount.save();
             return false;
         } catch (error) {
             console.error("Kotak Neo verify error:", error.message);
-            brokerAccount._verificationError = error.message;
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = error.message;
+            await brokerAccount.save();
             return false;
         }
     }
+
 
     // ✅ GROWW CREDENTIAL VERIFICATION & SESSION VALIDATION
     if (brokerAccount.broker === "GROWW") {
@@ -355,22 +337,18 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
             } catch (authGenErr) {
                 console.warn("[Groww] Auto token exchange failed:", authGenErr.message);
                 if (!token) {
-                    if (brokerAccount.isConnected) {
-                        brokerAccount.isConnected = false;
-                        await brokerAccount.save();
-                    }
-                    brokerAccount._verificationError = authGenErr.message;
+                    brokerAccount.isConnected = false;
+                    brokerAccount.verificationError = authGenErr.message;
+                    await brokerAccount.save();
                     return false;
                 }
             }
         }
 
         if (!token) {
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
-            brokerAccount._verificationError = "Groww Access Token or API Key & Secret are required";
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Groww Access Token or API Key & Secret are required.";
+            await brokerAccount.save();
             return false;
         }
 
@@ -385,51 +363,21 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
             // ✅ Verify session against live Groww profile endpoint GET /v1/user/detail
             const profile = await groww.getProfile();
             if (profile && (profile.ucc || profile.vendor_user_id || profile.nse_enabled !== undefined)) {
-                if (!brokerAccount.isConnected) {
-                    brokerAccount.isConnected = true;
-                    brokerAccount.lastConnectedAt = new Date();
-                    await brokerAccount.save();
-                }
+                brokerAccount.isConnected = true;
+                brokerAccount.verificationError = null;
+                brokerAccount.lastConnectedAt = new Date();
+                await brokerAccount.save();
                 return true;
             }
 
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Groww profile verification returned incomplete data.";
+            await brokerAccount.save();
             return false;
         } catch (error) {
-            const isAuthError =
-                error.status === 401 ||
-                error.status === 403 ||
-                error.message?.toLowerCase().includes("unauthorized") ||
-                error.message?.toLowerCase().includes("token") ||
-                error.message?.toLowerCase().includes("expired");
-
-            if (isAuthError) {
-                if (brokerAccount.isConnected) {
-                    brokerAccount.isConnected = false;
-                    await brokerAccount.save();
-                }
-                brokerAccount._verificationError = error.message;
-                return false;
-            }
-
-            // Fallback for mock/test tokens if non-auth network issue occurs
-            if (token && token.length >= 10 && brokerAccount.isActive) {
-                if (!brokerAccount.isConnected) {
-                    brokerAccount.isConnected = true;
-                    brokerAccount.lastConnectedAt = new Date();
-                    await brokerAccount.save();
-                }
-                return true;
-            }
-
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
-            brokerAccount._verificationError = error.message;
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = error.message;
+            await brokerAccount.save();
             return false;
         }
     }
@@ -461,27 +409,24 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
                 tomorrow6AM.setHours(6, 0, 0, 0);
                 brokerAccount.credentials.tokenExpiresAt = tomorrow6AM;
                 brokerAccount.isConnected = true;
+                brokerAccount.verificationError = null;
                 brokerAccount.lastConnectedAt = new Date();
                 await brokerAccount.save();
             } catch (authGenErr) {
                 console.warn("[Zerodha] Auto token exchange failed:", authGenErr.message);
                 if (!token) {
-                    if (brokerAccount.isConnected) {
-                        brokerAccount.isConnected = false;
-                        await brokerAccount.save();
-                    }
-                    brokerAccount._verificationError = authGenErr.message;
+                    brokerAccount.isConnected = false;
+                    brokerAccount.verificationError = authGenErr.message;
+                    await brokerAccount.save();
                     return false;
                 }
             }
         }
 
         if (!token && !apiKey) {
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
-            brokerAccount._verificationError = "Zerodha API Key and Access Token (or API Secret + Request Token) are required";
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Zerodha API Key and Access Token (or API Secret + Request Token) are required.";
+            await brokerAccount.save();
             return false;
         }
 
@@ -496,61 +441,30 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
             // ✅ Verify session against live Kite user profile endpoint GET /user/profile
             const profile = await zerodha.getProfile();
             if (profile && (profile.user_id || profile.user_name || profile.broker === "ZERODHA")) {
-                if (!brokerAccount.isConnected) {
-                    brokerAccount.isConnected = true;
-                    brokerAccount.lastConnectedAt = new Date();
-                    await brokerAccount.save();
-                }
+                brokerAccount.isConnected = true;
+                brokerAccount.verificationError = null;
+                brokerAccount.lastConnectedAt = new Date();
+                await brokerAccount.save();
                 return true;
             }
 
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = "Zerodha Kite profile verification returned invalid data.";
+            await brokerAccount.save();
             return false;
         } catch (error) {
-            const isAuthError =
-                error.status === 401 ||
-                error.status === 403 ||
-                error.message?.toLowerCase().includes("unauthorized") ||
-                error.message?.toLowerCase().includes("token") ||
-                error.message?.toLowerCase().includes("expired");
-
-            if (isAuthError) {
-                if (brokerAccount.isConnected) {
-                    brokerAccount.isConnected = false;
-                    await brokerAccount.save();
-                }
-                brokerAccount._verificationError = error.message;
-                return false;
-            }
-
-            // Fallback for mock/test tokens if non-auth network issue occurs
-            if (token && token.length >= 10 && brokerAccount.isActive) {
-                if (!brokerAccount.isConnected) {
-                    brokerAccount.isConnected = true;
-                    brokerAccount.lastConnectedAt = new Date();
-                    await brokerAccount.save();
-                }
-                return true;
-            }
-
-            if (brokerAccount.isConnected) {
-                brokerAccount.isConnected = false;
-                await brokerAccount.save();
-            }
-            brokerAccount._verificationError = error.message;
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = error.message;
+            await brokerAccount.save();
             return false;
         }
     }
 
     // For other brokers
     if (!brokerAccount.credentials?.accessToken && !brokerAccount.credentials?.apiKey) {
-        if (brokerAccount.isConnected) {
-            brokerAccount.isConnected = false;
-            await brokerAccount.save();
-        }
+        brokerAccount.isConnected = false;
+        brokerAccount.verificationError = "Missing credentials for broker account.";
+        await brokerAccount.save();
         return false;
     }
 
@@ -725,7 +639,7 @@ const getBrokerAccounts = async (req, res) => {
         // Sanitize sensitive credentials
         const sanitized = brokerAccounts.map(acc => {
             const doc = acc.toObject ? acc.toObject() : { ...acc };
-            doc.verificationError = acc._verificationError || null;
+            doc.verificationError = acc.verificationError || acc._verificationError || null;
             if (doc.credentials) {
                 delete doc.credentials.apiKey;
                 delete doc.credentials.apiSecret;
@@ -904,7 +818,13 @@ const updateBrokerAccount = async (req, res) => {
             if (credentials.totpSecret !== undefined) {
                 brokerAccount.credentials.totpSecret =
                     credentials.totpSecret;
+                // If user entered a new TOTP or 6-digit code and did not supply a manual accessToken,
+                // clear stale accessToken so fresh login with the new TOTP executes immediately
+                if (!credentials.accessToken) {
+                    brokerAccount.credentials.accessToken = "";
+                }
             }
+
 
             if (credentials.mobileNumber !== undefined) {
                 brokerAccount.credentials.mobileNumber =
@@ -1131,6 +1051,17 @@ const syncBrokerTrades = async (req, res) => {
                         console.warn(`[Upstox Sync] Notice for FY ${r.start} - ${r.end}:`, rErr.message);
                     }
                 }
+                // Also sync today's live trades from Upstox
+                try {
+                    const todayRes = await syncUpstoxTodayTrades({ brokerAccountId: id });
+                    totalInserted += todayRes?.inserted || 0;
+                    totalUpdated += todayRes?.updated || 0;
+                    totalSkipped += todayRes?.skipped || 0;
+                    totalFetched += todayRes?.todayFetched || 0;
+                } catch (tErr) {
+                    console.warn(`[Upstox Sync] Notice for today's trades:`, tErr.message);
+                }
+
                 result = {
                     inserted: totalInserted,
                     updated: totalUpdated,
@@ -1206,9 +1137,26 @@ const syncBrokerTrades = async (req, res) => {
 
     } catch (error) {
         console.error("Sync Broker Trades Error:", error);
-        return res.status(500).json({
+
+        // If the error is an auth / token / 401 / 403 error, mark account disconnected immediately
+        const isAuthError =
+            error.status === 401 ||
+            error.status === 403 ||
+            error.response?.status === 401 ||
+            error.response?.status === 403 ||
+            /401|403|token|unauthorized|expired|invalid.*token|session.*expired|access.*token.*invalid/i.test(error.message);
+
+        if (brokerAccount && isAuthError) {
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = error.message;
+            await brokerAccount.save().catch(() => {});
+        }
+
+        return res.status(isAuthError ? 401 : 500).json({
             success: false,
-            message: error.message || "Failed to sync trades"
+            message: error.message || "Failed to sync trades",
+            isConnected: false,
+            verificationError: brokerAccount?.verificationError || error.message
         });
     }
 };
@@ -1241,14 +1189,24 @@ const verifyBrokerAccount = async (req, res) => {
             });
         }
 
+        // ✅ Allow passing fresh TOTP code in verify request body
+        if (req.body?.totp || req.body?.totpSecret) {
+            brokerAccount.credentials.totpSecret = String(req.body.totp || req.body.totpSecret).trim();
+            brokerAccount.credentials.accessToken = "";
+            await brokerAccount.save();
+        }
+
+
         const isConnected = await verifyBrokerCredentials(brokerAccount);
+
 
         return res.status(200).json({
             success: true,
             isConnected,
+            verificationError: brokerAccount.verificationError || brokerAccount._verificationError || null,
             message: isConnected
                 ? "Broker account credentials are valid and connected!"
-                : (brokerAccount._verificationError || "Broker access token is expired or invalid. Please update credentials.")
+                : (brokerAccount.verificationError || brokerAccount._verificationError || "Broker access token is expired or invalid. Please update credentials.")
         });
     } catch (error) {
         console.error("Verify broker account error:", error);

@@ -44,7 +44,10 @@ export const getKotakNeoAdapterForAccount = async (brokerAccount) => {
     });
 
     // If we don't have an active trading token and we have login credentials, login now
-    if ((!accessToken || accessToken.length < 10) && clientId && password && mobileNumber && (totpSecret || apiKey)) {
+    // Note: Automated background login requires a reusable Base32 TOTP secret key.
+    // Static 6-digit OTPs (from Google Authenticator) expire in 30s and must NOT be used for automated background retry loops.
+    const isReusableTotp = totpSecret && !/^\d{6}$/.test(String(totpSecret).trim());
+    if ((!accessToken || accessToken.length < 10) && clientId && password && mobileNumber && isReusableTotp) {
         try {
             console.log(`[KotakNeoSync] Performing automated TOTP + MPIN login for ${clientId}...`);
             const session = await adapter.login();
@@ -58,10 +61,14 @@ export const getKotakNeoAdapterForAccount = async (brokerAccount) => {
                 }
                 brokerAccount.isConnected = true;
                 brokerAccount.lastConnectedAt = new Date();
+                brokerAccount.verificationError = "";
                 await brokerAccount.save();
             }
         } catch (authErr) {
             console.warn(`[KotakNeoSync] Auto-login notice for ${clientId}:`, authErr.message);
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = authErr.message;
+            await brokerAccount.save().catch(() => {});
         }
     }
 
@@ -91,9 +98,29 @@ export const syncKotakNeoTodayTrades = async ({ brokerAccountId }) => {
 
     const adapter = await getKotakNeoAdapterForAccount(brokerAccount);
 
-    console.log(`[KotakNeoSync] Syncing trades for account ${brokerAccountId}`);
+    if (!adapter.tradingToken) {
+        return {
+            inserted: 0,
+            updated: 0,
+            skipped: 0,
+            total: 0,
+            message: "No active trading session token for Kotak Neo"
+        };
+    }
 
     let rawTrades = [];
+    let hasAuthError = false;
+
+    const handleAuthError = async (err) => {
+        const isAuth = err.status === 401 || err.errorCode === 1003 || /401|session|token|unauthorized/i.test(err.message);
+        if (isAuth) {
+            hasAuthError = true;
+            brokerAccount.isConnected = false;
+            brokerAccount.credentials.accessToken = "";
+            brokerAccount.verificationError = err.message || "Invalid or expired session token. Please re-authenticate.";
+            await brokerAccount.save().catch(() => {});
+        }
+    };
 
     // 1. Fetch executed trades from Trade Book
     try {
@@ -101,40 +128,48 @@ export const syncKotakNeoTodayTrades = async ({ brokerAccountId }) => {
         if (Array.isArray(tradeBook) && tradeBook.length > 0) {
             rawTrades.push(...tradeBook);
             console.log(`[KotakNeoSync] TradeBook: ${tradeBook.length} executed trades found`);
-        } else {
-            console.log("[KotakNeoSync] TradeBook: empty for today");
         }
     } catch (err) {
-        console.warn("[KotakNeoSync] Notice reading trade book:", err.message);
+        await handleAuthError(err);
+        if (!hasAuthError) {
+            console.warn("[KotakNeoSync] Notice reading trade book:", err.message);
+        }
     }
 
     // 2. Fetch completed orders from Order Book as a secondary source / safety net
-    try {
-        const orders = await adapter.getOrderBook();
-        if (Array.isArray(orders)) {
-            const executedOrders = orders.filter(o => {
-                const filledQty = Number(o.qty || o.flQty || o.quantity || 0);
-                const status = String(o.ordSt || o.stat || "").toLowerCase();
-                return filledQty > 0 || status === "complete" || status === "traded" || status === "executed";
-            });
+    if (!hasAuthError) {
+        try {
+            const orders = await adapter.getOrderBook();
+            if (Array.isArray(orders)) {
+                const executedOrders = orders.filter(o => {
+                    const filledQty = Number(o.qty || o.flQty || o.quantity || 0);
+                    const status = String(o.ordSt || o.stat || "").toLowerCase();
+                    return filledQty > 0 || status === "complete" || status === "traded" || status === "executed";
+                });
 
-            let added = 0;
-            for (const eo of executedOrders) {
-                const orderId = String(eo.nOrdNo || eo.orderNo || "");
-                const exists = rawTrades.some(t => String(t.nOrdNo || t.orderNo || "") === orderId);
-                if (!exists) {
-                    rawTrades.push(eo);
-                    added++;
+                let added = 0;
+                for (const eo of executedOrders) {
+                    const orderId = String(eo.nOrdNo || eo.orderNo || "");
+                    const exists = rawTrades.some(t => String(t.nOrdNo || t.orderNo || "") === orderId);
+                    if (!exists) {
+                        rawTrades.push(eo);
+                        added++;
+                    }
+                }
+                if (added > 0) {
+                    console.log(`[KotakNeoSync] OrderBook: ${orders.length} orders total, ${added} added from completed orders`);
                 }
             }
-            console.log(`[KotakNeoSync] OrderBook: ${orders.length} orders total, ${added} added from completed orders`);
+        } catch (err) {
+            await handleAuthError(err);
+            if (!hasAuthError) {
+                console.warn("[KotakNeoSync] Notice inspecting order book:", err.message);
+            }
         }
-    } catch (err) {
-        console.warn("[KotakNeoSync] Notice inspecting order book:", err.message);
     }
 
     // 3. Fallback: If trade book and order book are empty (e.g. intraday books cleared after market hours), check position book
-    if (rawTrades.length === 0) {
+    if (!hasAuthError && rawTrades.length === 0) {
         try {
             const positions = await adapter.getPositions();
             if (Array.isArray(positions) && positions.length > 0) {
@@ -177,7 +212,10 @@ export const syncKotakNeoTodayTrades = async ({ brokerAccountId }) => {
                 }
             }
         } catch (posErr) {
-            console.warn("[KotakNeoSync] Notice inspecting positions for trades:", posErr.message);
+            await handleAuthError(posErr);
+            if (!hasAuthError) {
+                console.warn("[KotakNeoSync] Notice inspecting positions for trades:", posErr.message);
+            }
         }
     }
 

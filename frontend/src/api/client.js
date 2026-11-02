@@ -91,8 +91,14 @@ export const api = {
     }),
 
   // Broker accounts
-  listBrokerAccounts: (userId = getStoredUserId()) =>
-    request(withUserId('/api/broker-accounts', userId)),
+  listBrokerAccounts: (userId = getStoredUserId(), options = {}) => {
+    let path = withUserId('/api/broker-accounts', userId);
+    if (options.verify) {
+      const sep = path.includes('?') ? '&' : '?';
+      path = `${path}${sep}verify=true`;
+    }
+    return request(path);
+  },
 
   getBrokerAccount: (id) =>
     request(`/api/broker-accounts/${id}`),
@@ -196,6 +202,11 @@ export const api = {
   listTrades: (userId = getStoredUserId()) =>
     request(withUserId('/api/trades', userId)),
 
+  syncAllTrades: (userId = getStoredUserId()) =>
+    request(withUserId('/api/trades/sync-all', userId), {
+      method: 'POST',
+    }),
+
   createTrade: (payload) =>
     request('/api/trades', {
       method: 'POST',
@@ -252,6 +263,89 @@ export const api = {
 
   liveTradingSummary: (userId = getStoredUserId()) =>
     request(withUserId('/api/trades/live-summary', userId)),
+
+  exitPosition: (payload) =>
+    request('/api/trades/exit-position', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  exitAllPositions: (payload = {}) =>
+    request('/api/trades/exit-all-positions', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  // Copy Trading Endpoints
+  getCopyTradingConfig: () =>
+    request('/api/copy-trading/config'),
+
+  updateCopyTradingConfig: (payload) =>
+    request('/api/copy-trading/config', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  addFollower: (payload) =>
+    request('/api/copy-trading/followers', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  updateFollower: (id, payload) =>
+    request(`/api/copy-trading/followers/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteFollower: (id) =>
+    request(`/api/copy-trading/followers/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  triggerEmergencyStop: (reason) =>
+    request('/api/copy-trading/emergency-stop', {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+
+  resetEmergencyStop: () =>
+    request('/api/copy-trading/emergency-stop/reset', {
+      method: 'POST',
+    }),
+
+  getCopyOrders: (page = 1, limit = 50, status = '', symbol = '') => {
+    let path = `/api/copy-trading/orders?page=${page}&limit=${limit}`;
+    if (status) path += `&status=${encodeURIComponent(status)}`;
+    if (symbol) path += `&symbol=${encodeURIComponent(symbol)}`;
+    return request(path);
+  },
+
+  getCopyMetrics: () =>
+    request('/api/copy-trading/metrics'),
+
+  getCopyAuditLogs: (page = 1, limit = 50, eventType = '', severity = '') => {
+    let path = `/api/copy-trading/audit-logs?page=${page}&limit=${limit}`;
+    if (eventType) path += `&eventType=${encodeURIComponent(eventType)}`;
+    if (severity) path += `&severity=${encodeURIComponent(severity)}`;
+    return request(path);
+  },
+
+  triggerCopyReconciliation: () =>
+    request('/api/copy-trading/reconcile', {
+      method: 'POST',
+    }),
+
+  syncMasterTrades: () =>
+    request('/api/copy-trading/sync-master-trades', {
+      method: 'POST',
+    }),
+
+  simulateMasterOrder: (payload) =>
+    request('/api/copy-trading/simulate-master-order', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };
 
 const WS_URL =

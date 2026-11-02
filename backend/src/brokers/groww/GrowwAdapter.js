@@ -272,6 +272,103 @@ class GrowwAdapter {
         const data = await this._request("GET", `/v1/order/trades/${encodeURIComponent(growwOrderId)}?segment=${encodeURIComponent(segment)}&page=${page}&page_size=${pageSize}`);
         return data?.payload || data || [];
     }
+
+    /**
+     * Places an order using Groww Trading API v1
+     * Endpoint: POST /v1/order/create
+     */
+    async placeOrder({
+        symbol,
+        trading_symbol,
+        tradingsymbol,
+        exchange = "NSE",
+        transactionType,
+        transaction_type,
+        orderType = "MARKET",
+        order_type,
+        productCode = "INTRADAY",
+        product,
+        quantity,
+        price = 0,
+        triggerPrice = 0,
+        trigger_price,
+        validity = "DAY"
+    }) {
+        const sym = trading_symbol || tradingsymbol || symbol;
+        const tType = String(transaction_type || transactionType || "BUY").toUpperCase();
+        const oType = String(order_type || orderType || "MARKET").toUpperCase();
+        const prod = String(product || productCode || "INTRADAY").toUpperCase();
+
+        const payload = {
+            exchange: exchange.toUpperCase(),
+            trading_symbol: sym,
+            transaction_type: tType,
+            order_type: oType,
+            product: prod === "DELIVERY" || prod === "CNC" ? "CNC" : "MIS",
+            quantity: Number(quantity),
+            price: Number(price || 0),
+            trigger_price: Number(trigger_price || triggerPrice || 0),
+            validity
+        };
+
+        const res = await this._request("POST", "/v1/order/create", { data: payload });
+        const orderId = res?.groww_order_id || res?.order_id || res?.data?.groww_order_id || res?.payload?.groww_order_id;
+        return {
+            success: true,
+            orderId: String(orderId || `GW-${Date.now()}`),
+            data: res
+        };
+    }
+
+    /**
+     * Modifies an active order
+     * Endpoint: PUT /v1/order/modify
+     */
+    async modifyOrder({
+        orderId,
+        groww_order_id,
+        segment = "CASH",
+        quantity,
+        price = 0,
+        triggerPrice = 0,
+        orderType = "LIMIT"
+    }) {
+        const oId = String(groww_order_id || orderId);
+        const payload = {
+            groww_order_id: oId,
+            segment,
+            quantity: Number(quantity),
+            price: Number(price || 0),
+            trigger_price: Number(triggerPrice || 0),
+            order_type: String(orderType).toUpperCase()
+        };
+
+        const res = await this._request("PUT", "/v1/order/modify", { data: payload });
+        return {
+            success: true,
+            orderId: oId,
+            data: res
+        };
+    }
+
+    /**
+     * Cancels an open order
+     * Endpoint: DELETE /v1/order/cancel
+     */
+    async cancelOrder({ orderId, groww_order_id, segment = "CASH" } = {}) {
+        const oId = String(groww_order_id || orderId);
+        const payload = {
+            groww_order_id: oId,
+            segment
+        };
+
+        const res = await this._request("DELETE", "/v1/order/cancel", { data: payload });
+        return {
+            success: true,
+            orderId: oId,
+            data: res
+        };
+    }
 }
 
 export default GrowwAdapter;

@@ -140,6 +140,25 @@ export const mapDhanPosition = (pos) => {
     const realizedPnL = Number(pos.realizedProfit || 0);
     const unrealizedPnL = Number(pos.unrealizedProfit || 0);
 
+    // Compute live price (LTP) from Dhan position:
+    // If Dhan provides an explicit price, use it; otherwise derive it from unrealizedPnL & entry price.
+    // SHORT: unrealizedProfit = (sellAvg - LTP) * abs(netQty) => LTP = sellAvg - (unrealizedProfit / abs(netQty))
+    // LONG:  unrealizedProfit = (LTP - buyAvg) * netQty => LTP = buyAvg + (unrealizedProfit / netQty)
+    let derivedLtp = 0;
+    const directLtp = Number(pos.lastPrice ?? pos.ltp ?? pos.closePrice ?? 0);
+    if (directLtp > 0) {
+        derivedLtp = directLtp;
+    } else if (netQty !== 0) {
+        if (netQty > 0 && buyAvg > 0) {
+            derivedLtp = buyAvg + (unrealizedPnL / netQty);
+        } else if (netQty < 0 && sellAvg > 0) {
+            derivedLtp = sellAvg - (unrealizedPnL / Math.abs(netQty));
+        }
+    }
+    const avgEntryPrice = netQty >= 0 ? buyAvg : sellAvg;
+    const lastPrice = derivedLtp > 0 ? derivedLtp : avgEntryPrice;
+    const roundedLastPrice = Math.round((lastPrice + Number.EPSILON) * 100) / 100;
+
     return {
         key: `DHAN|${pos.exchangeSegment || "NSE_EQ"}|${symbol}|${pos.productType || "CNC"}`,
         broker: "DHAN",
@@ -147,10 +166,13 @@ export const mapDhanPosition = (pos) => {
         exchange: String(pos.exchangeSegment || "NSE").split("_")[0],
         segment: mapDhanSegment(pos.exchangeSegment, null, pos.drvOptionType),
         productType: mapDhanProduct(pos.productType),
+        securityId: pos.securityId ? String(pos.securityId) : undefined,
         instrumentToken: pos.securityId ? `${pos.exchangeSegment || "NSE_EQ"}|${pos.securityId}` : symbol,
         netQuantity: netQty,
         openQuantity: Math.abs(netQty),
-        averagePrice: netQty >= 0 ? buyAvg : sellAvg,
+        averagePrice: avgEntryPrice,
+        lastPrice: roundedLastPrice,
+        lastBrokerPrice: roundedLastPrice,
         realizedPnL,
         unrealizedPnL,
         status: netQty === 0 ? "CLOSED" : (buyQty > 0 && sellQty > 0 ? "PARTIALLY_SQUARED" : "OPEN"),
@@ -158,3 +180,4 @@ export const mapDhanPosition = (pos) => {
         brokerResponse: pos
     };
 };
+

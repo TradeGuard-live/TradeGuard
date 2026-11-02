@@ -451,6 +451,128 @@ class AngelOneAdapter {
         const res = await this._request("POST", "/rest/secure/angelbroking/historical/v1/getCandleData", payload);
         return res?.data || [];
     }
+
+    /**
+     * Places an order using Angel One SmartAPI
+     * Endpoint: POST /rest/secure/angelbroking/order/v1/placeOrder
+     */
+    async placeOrder({
+        variety = "NORMAL",
+        symbol,
+        tradingsymbol,
+        symbolToken,
+        symboltoken,
+        transactionType,
+        transactiontype,
+        exchange = "NSE",
+        orderType = "MARKET",
+        ordertype,
+        productType = "INTRADAY",
+        producttype,
+        duration = "DAY",
+        price = 0,
+        triggerPrice = 0,
+        triggerprice,
+        quantity
+    }) {
+        const sym = tradingsymbol || symbol;
+        const tok = String(symboltoken || symbolToken || "");
+        const tType = String(transactiontype || transactionType || "BUY").toUpperCase();
+        const oType = String(ordertype || orderType || "MARKET").toUpperCase();
+        const pType = String(producttype || productType || "INTRADAY").toUpperCase();
+
+        const smartVariety = variety || (oType.includes("SL") ? "STOPLOSS" : "NORMAL");
+        let smartProduct = "INTRADAY";
+        if (pType === "DELIVERY" || pType === "CNC") smartProduct = "DELIVERY";
+        else if (pType === "CARRYFORWARD" || pType === "NRML") smartProduct = "CARRYFORWARD";
+        else if (pType === "MARGIN") smartProduct = "MARGIN";
+
+        let smartOrderType = "MARKET";
+        if (oType === "LIMIT" || oType === "L") smartOrderType = "LIMIT";
+        else if (oType === "SL" || oType === "STOPLOSS_LIMIT") smartOrderType = "STOPLOSS_LIMIT";
+        else if (oType === "SL-M" || oType === "STOPLOSS_MARKET") smartOrderType = "STOPLOSS_MARKET";
+
+        const payload = {
+            variety: smartVariety,
+            tradingsymbol: sym,
+            symboltoken: tok,
+            transactiontype: tType,
+            exchange: exchange.toUpperCase(),
+            ordertype: smartOrderType,
+            producttype: smartProduct,
+            duration: duration || "DAY",
+            price: String(price || 0),
+            squareoff: "0",
+            stoploss: "0",
+            triggerprice: String(triggerprice || triggerPrice || 0),
+            quantity: String(quantity)
+        };
+
+        const res = await this._request("POST", "/rest/secure/angelbroking/order/v1/placeOrder", payload);
+        const orderId = res?.data?.orderid || res?.data?.uniqueorderid || res?.orderid;
+        return {
+            success: true,
+            orderId: String(orderId),
+            data: res?.data,
+            raw: res
+        };
+    }
+
+    /**
+     * Modifies an active order
+     * Endpoint: POST /rest/secure/angelbroking/order/v1/modifyOrder
+     */
+    async modifyOrder({
+        variety = "NORMAL",
+        orderId,
+        orderid,
+        orderType = "LIMIT",
+        ordertype,
+        productType = "INTRADAY",
+        price = 0,
+        quantity,
+        triggerPrice = 0
+    }) {
+        const oId = String(orderid || orderId);
+        const payload = {
+            variety,
+            orderid: oId,
+            ordertype: String(ordertype || orderType || "LIMIT").toUpperCase(),
+            producttype: String(productType).toUpperCase(),
+            duration: "DAY",
+            price: String(price || 0),
+            quantity: String(quantity),
+            triggerprice: String(triggerPrice || 0)
+        };
+
+        const res = await this._request("POST", "/rest/secure/angelbroking/order/v1/modifyOrder", payload);
+        return {
+            success: true,
+            orderId: oId,
+            data: res?.data,
+            raw: res
+        };
+    }
+
+    /**
+     * Cancels an open order
+     * Endpoint: POST /rest/secure/angelbroking/order/v1/cancelOrder
+     */
+    async cancelOrder({ variety = "NORMAL", orderId, orderid } = {}) {
+        const oId = String(orderid || orderId);
+        const payload = {
+            variety,
+            orderid: oId
+        };
+
+        const res = await this._request("POST", "/rest/secure/angelbroking/order/v1/cancelOrder", payload);
+        return {
+            success: true,
+            orderId: oId,
+            data: res?.data,
+            raw: res
+        };
+    }
 }
 
 export default AngelOneAdapter;

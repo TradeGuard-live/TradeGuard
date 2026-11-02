@@ -190,10 +190,11 @@ class KotakNeoAdapter {
             // Attempt automatic re-login once if tokens expired, auto-login is not suppressed, not retried, and not in cooldown
             const now = Date.now();
             const isInCooldown = KotakNeoAdapter._lastLoginFailure && (now - KotakNeoAdapter._lastLoginFailure < 60000);
+            const hasReusableSecret = this.totpSecret && !/^\d{6}$/.test(String(this.totpSecret).trim());
 
-            if (isAuthExpired && !options._retried && !options.noAutoLogin && !isInCooldown && this.clientId && this.password && (this.totpSecret || options.totp)) {
+            if (isAuthExpired && !options._retried && !options.noAutoLogin && !isInCooldown && this.clientId && this.password && (hasReusableSecret || options.totp)) {
                 try {
-                    console.log("[KotakNeoAdapter] Session expired or invalid, attempting automatic re-login...");
+                    console.log("[KotakNeoAdapter] Session expired or invalid, attempting automatic re-login with TOTP key...");
                     await this.login({
                         ucc: this.clientId,
                         mobileNumber: this.mobileNumber,
@@ -526,9 +527,46 @@ class KotakNeoAdapter {
         }
 
         const tt = String(transactionType).toUpperCase().startsWith("S") ? "S" : "B";
-        const pt = String(orderType).toUpperCase().trim();
-        const pc = String(productCode).toUpperCase().trim();
-        const es = String(exchangeSegment).toLowerCase().trim();
+        
+        let pt = String(orderType || "MKT").toUpperCase().trim();
+        if (pt === "MARKET") pt = "MKT";
+        else if (pt === "LIMIT") pt = "L";
+        else if (pt === "STOP_LOSS" || pt === "STOPLOSS") pt = "SL";
+        else if (pt === "STOP_LOSS_MARKET" || pt === "SL_M") pt = "SL-M";
+        if (!["MKT", "L", "SL", "SL-M"].includes(pt)) pt = "MKT";
+
+        let pc = String(productCode || "MIS").toUpperCase().trim();
+        if (pc === "INTRADAY") pc = "MIS";
+        else if (pc === "DELIVERY") pc = "CNC";
+        else if (pc === "NORMAL") pc = "NRML";
+        if (!["CNC", "MIS", "NRML"].includes(pc)) pc = "MIS";
+
+        const es = String(exchangeSegment || "nse_cm").toLowerCase().trim();
+
+        let cleanSymbol = String(symbol).trim();
+        if (cleanSymbol.includes("|")) {
+            cleanSymbol = cleanSymbol.split("|").pop().trim();
+        } else if (cleanSymbol.includes(":")) {
+            cleanSymbol = cleanSymbol.split(":").pop().trim();
+        }
+        cleanSymbol = cleanSymbol.replace(/_EQ$/i, "-EQ");
+        // For cash equity segments (nse_cm, bse_cm), Kotak Neo requires the series suffix "-EQ" (e.g. LTF-EQ)
+        if (es.endsWith("_cm") && !cleanSymbol.includes("-") && !cleanSymbol.includes(" ")) {
+            cleanSymbol = `${cleanSymbol}-EQ`;
+        }
+
+        // For MARKET and SL-M orders, Kotak Neo requires price (pr) to be "0".
+        // Passing non-zero price for market orders triggers "400: body invalid".
+        const rawPriceNum = Number(price);
+        const orderPrice = (pt === "MKT" || pt === "SL-M")
+            ? "0"
+            : (!isNaN(rawPriceNum) && rawPriceNum > 0 ? rawPriceNum.toFixed(2) : "0");
+
+        // Trigger price is only applicable to SL and SL-M orders
+        const rawTriggerNum = Number(triggerPrice);
+        const orderTrigger = (pt === "SL" || pt === "SL-M")
+            ? (!isNaN(rawTriggerNum) && rawTriggerNum > 0 ? rawTriggerNum.toFixed(2) : "0")
+            : "0";
 
         const jData = {
             am: amo === "YES" ? "YES" : "NO",
@@ -537,12 +575,12 @@ class KotakNeoAdapter {
             mp: "0",
             pc,
             pf: "N",
-            pr: String(price || "0"),
+            pr: String(orderPrice),
             pt,
             qt: String(quantity),
             rt: String(validity || "DAY").toUpperCase(),
-            tp: String(triggerPrice || "0"),
-            ts: String(symbol),
+            tp: String(orderTrigger),
+            ts: cleanSymbol,
             tt
         };
 

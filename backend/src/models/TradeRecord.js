@@ -21,7 +21,9 @@ const tradeRecordSchema = new mongoose.Schema(
                 "UPSTOX",
                 "ANGEL_ONE",
                 "DHAN",
-                "KOTAK_NEO"
+                "KOTAK_NEO",
+                "GROWW",
+                "ZERODHA"
             ],
             required: true
         },
@@ -47,6 +49,11 @@ const tradeRecordSchema = new mongoose.Schema(
 
         exchange: {
             type: String
+        },
+
+        instrumentToken: {
+            type: String,
+            default: null
         },
 
         segment: {

@@ -11,8 +11,8 @@ const brokerAccountSchema = new mongoose.Schema(
 
         broker: {
             type: String,
-            // ✅ Supported brokers: UPSTOX, ANGEL_ONE, DHAN, KOTAK_NEO (legacy), GROWW, ZERODHA
-            enum: ["UPSTOX", "ANGEL_ONE", "DHAN", "KOTAK_NEO", "GROWW", "ZERODHA"],
+            // ✅ Supported brokers: UPSTOX, ANGEL_ONE, DHAN, KOTAK_NEO (legacy), GROWW, ZERODHA, MOCK (simulation)
+            enum: ["UPSTOX", "ANGEL_ONE", "DHAN", "KOTAK_NEO", "GROWW", "ZERODHA", "MOCK"],
             required: true
         },
 
@@ -39,6 +39,11 @@ const brokerAccountSchema = new mongoose.Schema(
         isConnected: {
             type: Boolean,
             default: false
+        },
+
+        verificationError: {
+            type: String,
+            default: null
         },
 
         isActive: {

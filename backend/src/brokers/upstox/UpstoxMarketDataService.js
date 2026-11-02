@@ -11,9 +11,24 @@
 
 import UpstoxClient from "upstox-js-sdk";
 import axios from "axios";
+import { createRequire } from "module";
 import quoteCache from "../../services/marketData/quoteCache.js";
 import upstoxInstrumentService from "../../services/marketData/upstoxInstrumentService.js";
 import { getMarketSession } from "../../services/marketData/marketSessionService.js";
+
+// ✅ Fix Upstox SDK bug: Streamer.js calls this.streamer.clearSubscriptions() on autoReconnect stop,
+// but MarketDataFeederV3 lacks clearSubscriptions, resulting in an unhandled TypeError crash.
+try {
+    const require = createRequire(import.meta.url);
+    const { MarketDataFeederV3 } = require("upstox-js-sdk/dist/feeder/MarketDataFeederV3");
+    if (MarketDataFeederV3 && typeof MarketDataFeederV3.prototype.clearSubscriptions !== "function") {
+        MarketDataFeederV3.prototype.clearSubscriptions = function() {
+            this.instrumentKeys = [];
+        };
+    }
+} catch (e) {
+    // ignore
+}
 
 class UpstoxMarketDataService {
     constructor() {
@@ -45,17 +60,35 @@ class UpstoxMarketDataService {
 
             if (!symbolsParam) return new Map();
 
-            const response = await this.restClient.get("/market-quote/quotes", {
-                params: { symbol: symbolsParam },
-                headers: {
-                    Accept: "application/json",
-                    Authorization: `Bearer ${accessToken}`,
-                    "Api-Version": "2.0"
+            let response;
+            try {
+                response = await this.restClient.get("/market-quote/quotes", {
+                    params: { instrument_key: symbolsParam },
+                    headers: {
+                        Accept: "application/json",
+                        Authorization: `Bearer ${accessToken}`,
+                        "Api-Version": "2.0"
+                    }
+                });
+            } catch (err) {
+                // Fallback to /market-quote/ltp
+                try {
+                    response = await this.restClient.get("/market-quote/ltp", {
+                        params: { instrument_key: symbolsParam },
+                        headers: {
+                            Accept: "application/json",
+                            Authorization: `Bearer ${accessToken}`,
+                            "Api-Version": "2.0"
+                        }
+                    });
+                } catch (ltpErr) {
+                    console.warn("[UpstoxMarketData] REST quotes & LTP fetch notice:", ltpErr.response?.data?.message || ltpErr.message);
+                    return new Map();
                 }
-            });
+            }
 
             const quoteMap = new Map();
-            const data = response.data?.data;
+            const data = response?.data?.data;
 
             if (data && typeof data === "object") {
                 for (const [key, quote] of Object.entries(data)) {
@@ -72,10 +105,11 @@ class UpstoxMarketDataService {
 
                         const exchange = normalizedKey.startsWith("BSE") ? "BSE" : "NSE";
                         const segment = normalizedKey.includes("_FO") ? "FUTURES" : "EQUITY";
+                        const symbol = quote.symbol || normalizedKey.split("|")[1] || key;
 
                         const updatedQuote = quoteCache.updateQuote({
                             instrumentKey: normalizedKey,
-                            symbol: quote.symbol || normalizedKey.split("|")[1],
+                            symbol,
                             exchange,
                             segment,
                             lastPrice: ltp,
@@ -89,6 +123,8 @@ class UpstoxMarketDataService {
 
                         if (updatedQuote) {
                             quoteMap.set(normalizedKey, updatedQuote);
+                            quoteMap.set(key, updatedQuote);
+                            if (symbol) quoteMap.set(symbol, updatedQuote);
                         }
                     }
                 }
@@ -121,6 +157,14 @@ class UpstoxMarketDataService {
 
         // Ensure session allows streaming (no pointless connection when exchange is closed)
         const session = getMarketSession("NSE", "EQUITY");
+        if (!session.isOpen) {
+            console.log(`[UpstoxMarketData] Market is closed (${session.message || session.session}). Skipping live WebSocket feed; closing quotes preserved via REST.`);
+            return {
+                connected: false,
+                marketClosed: true,
+                session
+            };
+        }
 
         try {
             // ✅ Configure singleton ApiClient instance required by upstox-js-sdk
@@ -174,6 +218,13 @@ class UpstoxMarketDataService {
 
                                 if (updatedQuote && typeof onMarketData === "function") {
                                     onMarketData(normalizedKey, Number(ltp), updatedQuote);
+                                    if (key && key !== normalizedKey) {
+                                        onMarketData(key, Number(ltp), updatedQuote);
+                                    }
+                                    const sym = updatedQuote.symbol || normalizedKey.split("|")[1];
+                                    if (sym) {
+                                        onMarketData(sym, Number(ltp), updatedQuote);
+                                    }
                                 }
                             }
                         }
@@ -184,11 +235,47 @@ class UpstoxMarketDataService {
             });
 
             streamer.on("error", (err) => {
-                console.warn(`[UpstoxMarketData] Stream notice for ${uId}:`, err?.message || err);
+                const currentSession = getMarketSession("NSE", "EQUITY");
+                if (!currentSession.isOpen) {
+                    try {
+                        if (typeof streamer.autoReconnect === "function") {
+                            streamer.autoReconnect(false);
+                        }
+                    } catch (e) {}
+                    try {
+                        streamer.disconnect();
+                    } catch (e) {}
+                    this.streamers.delete(uId);
+                    return;
+                }
+                const msg = err?.message || String(err);
+                if (msg.includes("socket hang up") || msg.includes("EHOSTUNREACH")) {
+                    console.warn(`[UpstoxMarketData] Connection notice for ${uId}: ${msg}`);
+                } else {
+                    console.warn(`[UpstoxMarketData] Stream notice for ${uId}:`, msg);
+                }
             });
 
             streamer.on("close", () => {
+                const currentSession = getMarketSession("NSE", "EQUITY");
+                if (!currentSession.isOpen) {
+                    console.log(`[UpstoxMarketData] Market closed (${currentSession.session}). Stopping auto-reconnect for ${uId}.`);
+                    try {
+                        if (typeof streamer.autoReconnect === "function") {
+                            streamer.autoReconnect(false);
+                        }
+                    } catch (e) {}
+                    try {
+                        streamer.disconnect();
+                    } catch (e) {}
+                    this.streamers.delete(uId);
+                    return;
+                }
                 console.log(`[UpstoxMarketData] Stream closed for ${uId}`);
+            });
+
+            streamer.on("autoReconnectStopped", (reason) => {
+                console.log(`[UpstoxMarketData] Auto reconnect stopped for ${uId}:`, reason);
             });
 
             this.streamers.set(uId, streamer);
@@ -212,6 +299,13 @@ class UpstoxMarketDataService {
         const uId = String(userId);
         const streamer = this.streamers.get(uId);
         if (streamer) {
+            try {
+                if (typeof streamer.autoReconnect === "function") {
+                    streamer.autoReconnect(false);
+                }
+            } catch (e) {
+                // ignore
+            }
             try {
                 streamer.disconnect();
             } catch (e) {

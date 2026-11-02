@@ -39,9 +39,11 @@ export default function Register() {
   return (
     <div className="auth-container">
       <div className="auth-card">
-        <div className="auth-logo">
-          <Shield size={24} />
-        </div>
+        <Link to="/" style={{ display: 'block', textDecoration: 'none' }} title="TradeGuard Home">
+          <div className="auth-logo">
+            <Shield size={24} />
+          </div>
+        </Link>
         <h1 className="auth-title">Create account</h1>
         <p className="auth-subtitle">Start tracking your trading performance</p>
 

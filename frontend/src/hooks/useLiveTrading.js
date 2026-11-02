@@ -106,7 +106,26 @@ export function useLiveTrading() {
         try {
           const payload = JSON.parse(event.data);
 
-          if (payload.type === 'INITIAL_DATA' || payload.type === 'LIVE_PNL_UPDATE') {
+          if (payload.type === 'AUTH_ERROR') {
+            setError(payload.message || 'Authentication failed');
+            setIsConnecting(false);
+            return;
+          }
+
+          if (payload.type === 'AUTH_SUCCESS') {
+            setIsConnected(true);
+            setIsConnecting(false);
+            setError(null);
+            return;
+          }
+
+          if (payload.type === 'TRADES_UPDATED' || payload.type === 'ORDER_DETECTED' || payload.type === 'ORDER_UPDATE') {
+            window.dispatchEvent(new CustomEvent('tg_trades_updated', { detail: payload.data }));
+            loadInitialSnapshot();
+            return;
+          }
+
+          if (payload.type === 'INITIAL_DATA' || payload.type === 'LIVE_PNL_UPDATE' || payload.type === 'POSITIONS_UPDATED') {
             const data = payload.data;
             if (!data) return;
 
@@ -149,6 +168,11 @@ export function useLiveTrading() {
 
             if (data.allPositions) setAllPositions(data.allPositions);
             if (data.squaredPositions) setSquaredPositions(data.squaredPositions);
+
+            // Notify Trade History whenever initial snapshot contains positions
+            if (payload.type === 'INITIAL_DATA') {
+              window.dispatchEvent(new CustomEvent('tg_trades_updated', { detail: data }));
+            }
           }
         } catch (e) {
           console.error('[LiveWS] Parse error:', e);

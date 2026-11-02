@@ -13,6 +13,7 @@ import ResetPassword from './pages/auth/ResetPassword';
 
 import Overview from './pages/Overview';
 import LiveTrading from './pages/LiveTrading';
+import CopyTrading from './pages/CopyTrading';
 import BrokerAccounts from './pages/BrokerAccounts';
 import BrokerAccountForm from './pages/BrokerAccountForm';
 import Trades from './pages/Trades';
@@ -40,6 +41,7 @@ function Protected({ children }) {
 
 const PAGE_META = {
   live: { title: 'Live Trading', subtitle: 'Real-time WebSocket market feed & position tracker' },
+  'copy-trading': { title: 'Copy Trading', subtitle: 'Deterministic multi-broker order synchronization engine' },
   overview: { title: 'Overview', subtitle: 'Performance dashboard & real-time analytics' },
   'broker-accounts': { title: 'Broker Accounts', subtitle: 'Connected trading accounts & API management' },
   trades: { title: 'Trades', subtitle: 'Trade history, execution logs & position tracking' },
@@ -65,10 +67,12 @@ function AppRoutes() {
       <Route path="/register" element={<Register />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/reset-password/:token" element={<ResetPassword />} />
 
       <Route path="/app" element={<Protected><Navigate to="/app/overview" replace /></Protected>} />
 
       <Route path="/app/live" element={<Protected><AppPage page="live"><LiveTrading /></AppPage></Protected>} />
+      <Route path="/app/copy-trading" element={<Protected><AppPage page="copy-trading"><CopyTrading /></AppPage></Protected>} />
       <Route path="/app/overview" element={<Protected><AppPage page="overview"><Overview /></AppPage></Protected>} />
       <Route path="/app/broker-accounts" element={<Protected><AppPage page="broker-accounts"><BrokerAccounts /></AppPage></Protected>} />
       <Route path="/app/broker-accounts/new" element={<Protected><AppPage page="broker-accounts"><BrokerAccountForm /></AppPage></Protected>} />

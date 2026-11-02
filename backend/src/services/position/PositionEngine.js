@@ -31,8 +31,12 @@ function normalizeProduct(prod = "") {
 
 function normalizeSymbol(symbol = "") {
     let s = String(symbol || "").toUpperCase().trim();
+    // Strip broker exchange prefixes like NSE_EQ|, BSE_EQ|, NSE:, BSE:
+    s = s.replace(/^(NSE_EQ|BSE_EQ|NSE|BSE)[|:]/i, "");
     // Strip common broker exchange series suffixes (-EQ, .NSE, .BSE, -BE, -BL)
     s = s.replace(/(-EQ|\.NSE|\.BSE|-BE|-BL)$/i, "");
+    // Normalize spaces within symbol names (e.g. "TATA STEEL" -> "TATASTEEL")
+    s = s.replace(/\s+/g, "");
     return s;
 }
 
@@ -49,10 +53,13 @@ function getTradeDate(trade) {
 
 function getTradeKey(trade) {
     const brokerAccountId = String(trade.brokerAccountId || "");
-    const exchange = String(trade.exchange || "NSE").toUpperCase();
     const segment = String(trade.segment || "EQUITY").toUpperCase();
     const symbol = normalizeSymbol(trade.symbol || trade.trading_symbol || trade.scrip_name || "");
     const productType = normalizeProduct(trade.productType || trade.productCode || trade.product);
+    // In Indian markets, cash equities (EQUITY) settle Demat shares fungibly across NSE and BSE within an account.
+    // Derivatives (F&O, COMMODITY, CURRENCY) remain strictly exchange-specific.
+    const isEquity = segment === "EQUITY" || (!segment.includes("FO") && !segment.includes("FUT") && !segment.includes("OPT") && !segment.includes("COMM") && !segment.includes("CURR"));
+    const exchange = isEquity ? "EQ" : String(trade.exchange || "NSE").toUpperCase();
     return `${brokerAccountId}|${exchange}|${segment}|${symbol}|${productType}`;
 }
 
@@ -76,7 +83,8 @@ export class PositionEngine {
             return qty > 0 && price >= 0;
         }).sort((a, b) => getTradeDate(a).getTime() - getTradeDate(b).getTime());
 
-        const positionsMap = new Map();
+        const activePositionsMap = new Map();
+        const completedPositions = [];
 
         for (const trade of sortedTrades) {
             const key = getTradeKey(trade);
@@ -91,14 +99,22 @@ export class PositionEngine {
             const productType = String(trade.productType || trade.productCode || trade.product || "INTRADAY").toUpperCase();
             // ✅ Resolve canonical instrument key using Upstox instrument service
             const instrumentToken = trade.instrumentToken ||
+                                    trade.instrument_token ||
+                                    trade.instrument_key ||
                                     trade.brokerResponse?.instrument_token ||
+                                    trade.brokerResponse?.instrument_key ||
                                     upstoxInstrumentService.resolveInstrumentKey({ symbol, exchange, segment }) ||
                                     `${exchange}_EQ|${symbol}`;
 
-            if (!positionsMap.has(key)) {
-                positionsMap.set(key, {
+            if (instrumentToken && instrumentToken.includes("|")) {
+                upstoxInstrumentService.registerInstrument(exchange, symbol, instrumentToken);
+            }
+
+            if (!activePositionsMap.has(key)) {
+                activePositionsMap.set(key, {
                     key,
                     brokerAccountId: trade.brokerAccountId || null,
+                    broker: trade.broker || null,
                     symbol,
                     exchange,
                     segment,
@@ -119,7 +135,7 @@ export class PositionEngine {
                 });
             }
 
-            const position = positionsMap.get(key);
+            const position = activePositionsMap.get(key);
             position.lastTradeDate = tradeDate;
 
             if (side === "BUY") {
@@ -204,18 +220,6 @@ export class PositionEngine {
                 ? Math.round(((weightedOpenValue / openQty) + Number.EPSILON) * 100) / 100
                 : 0;
 
-            // Determine Position Status
-            if (position.openQuantity <= EPSILON) {
-                position.status = "FULLY_SQUARED";
-                position.side = "FLAT";
-            } else if (position.squaredLots.length > 0) {
-                position.status = "PARTIALLY_SQUARED";
-                position.side = position.netQuantity > 0 ? "BUY" : "SELL";
-            } else {
-                position.status = "OPEN";
-                position.side = position.netQuantity > 0 ? "BUY" : "SELL";
-            }
-
             // Enhanced Position Metrics
             const totalBuyQty = position.totalBuyQuantity;
             const totalSellQty = position.totalSellQuantity;
@@ -245,10 +249,35 @@ export class PositionEngine {
             position.winRate = position.squaredLots.length > 0
                 ? Math.round((winLots.length / position.squaredLots.length) * 100)
                 : 0;
-            position.realizedPnL = Math.round((position.realizedPnL + Number.EPSILON) * 100) / 100;
+
+            // Determine Position Status & Lifecycle
+            if (position.openQuantity <= EPSILON) {
+                position.status = "FULLY_SQUARED";
+                position.side = "FLAT";
+                position.openQuantity = 0;
+                position.netQuantity = 0;
+                position.averagePrice = 0;
+                position.openLots = [];
+                position.realizedPnL = Math.round((position.realizedPnL + Number.EPSILON) * 100) / 100;
+                position.closeDate = tradeDate;
+
+                // Archive this completed cycle
+                completedPositions.push({ ...position });
+
+                // Remove from active positions so future trades for this symbol start a fresh cycle
+                activePositionsMap.delete(key);
+            } else if (position.squaredLots.length > 0) {
+                position.status = "PARTIALLY_SQUARED";
+                position.side = position.netQuantity > 0 ? "BUY" : "SELL";
+                position.realizedPnL = Math.round((position.realizedPnL + Number.EPSILON) * 100) / 100;
+            } else {
+                position.status = "OPEN";
+                position.side = position.netQuantity > 0 ? "BUY" : "SELL";
+                position.realizedPnL = 0;
+            }
         }
 
-        return Array.from(positionsMap.values());
+        return [...Array.from(activePositionsMap.values()), ...completedPositions];
     }
 
     /**
@@ -258,7 +287,7 @@ export class PositionEngine {
      */
     getOpenPositions(trades = []) {
         const all = this.processTrades(trades);
-        return all.filter(p => p.openQuantity > EPSILON);
+        return all.filter(p => p.openQuantity > EPSILON && p.status !== "FULLY_SQUARED");
     }
 
     /**
@@ -273,9 +302,12 @@ export class PositionEngine {
 
     /**
      * Reconciles matched trade positions with Upstox / Angel One / Dhan / Kotak Neo positions.
+     * When a broker reports netQuantity === 0 or position is closed, it squares the position
+     * and filters it out so it never lingers in open positions.
+     * 
      * @param {Array} computedPositions 
      * @param {Array} brokerPositions (from broker API)
-     * @returns {Array} reconciledPositions
+     * @returns {Array} reconciledOpenPositions
      */
     reconcileWithBrokerPositions(computedPositions, brokerPositions = []) {
         if (!Array.isArray(brokerPositions) || brokerPositions.length === 0) {
@@ -290,60 +322,109 @@ export class PositionEngine {
         });
 
         for (const bp of brokerPositions) {
-            const rawSym = String(bp.trading_symbol || bp.tradingsymbol || bp.symbol || bp.trdSym || "").toUpperCase();
+            const rawSym = String(bp.trading_symbol || bp.tradingsymbol || bp.symbol || bp.trdSym || bp.securityId || "").toUpperCase();
             const cleanSym = normalizeSymbol(rawSym);
             const existing = computedMap.get(cleanSym) || computedMap.get(rawSym);
 
+            const brokerToken = bp.instrumentToken || bp.instrument_token || bp.instrument_key || bp.brokerResponse?.instrument_token || bp.brokerResponse?.instrument_key;
+            const brokerPrice = Number(bp.lastPrice ?? bp.last_price ?? bp.brokerResponse?.last_price ?? 0);
+            const avgPrice = Number(bp.averagePrice ?? bp.average_price ?? bp.buy_price ?? bp.brokerResponse?.average_price ?? bp.brokerResponse?.buy_price ?? 0);
+            const brokerQty = Number(bp.netQuantity ?? bp.quantity ?? bp.net_quantity ?? bp.netQty ?? bp.qty ?? 0);
+            const isBrokerClosed = brokerQty === 0 || bp.status === "CLOSED" || bp.status === "FULLY_SQUARED";
+
             if (existing) {
                 // Enrich with exact broker instrument token & live price
-                if (bp.instrument_token) existing.instrumentToken = bp.instrument_token;
-                if (bp.last_price) existing.lastBrokerPrice = Number(bp.last_price);
-                if (bp.quantity !== undefined && Number(bp.quantity) !== 0) {
-                    existing.brokerQuantity = Number(bp.quantity);
+                if (brokerToken) {
+                    existing.instrumentToken = brokerToken;
+                    upstoxInstrumentService.registerInstrument(existing.exchange || "NSE", existing.symbol, brokerToken);
                 }
-            } else {
+                if (bp.securityId) {
+                    existing.securityId = String(bp.securityId);
+                }
+                if (bp.broker) {
+                    existing.broker = bp.broker;
+                }
+                if (bp.brokerAccountId) {
+                    existing.brokerAccountId = bp.brokerAccountId;
+                }
+                if (brokerPrice > 0) {
+                    existing.lastBrokerPrice = brokerPrice;
+                    existing.lastPrice = brokerPrice;
+                }
+                if ((!existing.averagePrice || existing.averagePrice <= 0) && avgPrice > 0) {
+                    existing.averagePrice = avgPrice;
+                }
+
+                if (isBrokerClosed) {
+                    existing.openQuantity = 0;
+                    existing.netQuantity = 0;
+                    existing.brokerQuantity = 0;
+                    existing.status = "FULLY_SQUARED";
+                    const realized = Number(bp.realizedPnL ?? bp.realised_profit ?? bp.realised ?? bp.pnl);
+                    if (!Number.isNaN(realized) && realized !== 0) {
+                        existing.realizedPnL = Math.round((realized + Number.EPSILON) * 100) / 100;
+                    }
+                } else {
+                    existing.brokerQuantity = brokerQty;
+                    existing.openQuantity = Math.abs(brokerQty);
+                    existing.netQuantity = brokerQty;
+                    existing.side = brokerQty > 0 ? "BUY" : "SELL";
+                    if (existing.squaredLots && existing.squaredLots.length > 0) {
+                        existing.status = "PARTIALLY_SQUARED";
+                    } else {
+                        existing.status = "OPEN";
+                        existing.realizedPnL = 0;
+                    }
+                }
+            } else if (!isBrokerClosed && brokerQty !== 0) {
                 // Broker has a position that wasn't in trade records (e.g. carry-forward/pre-existing)
-                const qty = Number(bp.quantity || 0);
-                if (qty !== 0) {
-                    const sym = cleanSym || rawSym || "UNKNOWN";
-                    const side = qty > 0 ? "BUY" : "SELL";
-                    const resolvedToken = bp.instrument_token || upstoxInstrumentService.resolveInstrumentKey({ symbol: sym, exchange: bp.exchange || "NSE" }) || `NSE_EQ|${sym}`;
-                    reconciled.push({
-                        // ✅ Resolved clean symbol and exact instrument key without ReferenceError
-                        key: `BROKER|${resolvedToken}`,
-                        brokerAccountId: null,
-                        symbol: sym,
-                        exchange: bp.exchange || "NSE",
-                        segment: bp.segment || "EQUITY",
-                        productType: bp.product || "INTRADAY",
-                        instrumentToken: resolvedToken,
-                        totalBuyQuantity: qty > 0 ? Math.abs(qty) : 0,
-                        totalSellQuantity: qty < 0 ? Math.abs(qty) : 0,
-                        totalBuyValue: 0,
-                        totalSellValue: 0,
-                        openQuantity: Math.abs(qty),
-                        netQuantity: qty,
-                        averagePrice: Number(bp.average_price || bp.buy_price || bp.sell_price || 0),
-                        realizedPnL: Number(bp.realised || bp.realized_pnl || 0),
-                        status: "OPEN",
-                        side,
-                        openLots: [{
-                            tradeId: "BROKER_SYNC",
-                            side: qty > 0 ? "LONG" : "SHORT",
-                            price: Number(bp.average_price || 0),
-                            initialQuantity: Math.abs(qty),
-                            remainingQuantity: Math.abs(qty),
-                            tradeDate: new Date()
-                        }],
-                        squaredLots: [],
-                        lastTradeDate: new Date(),
-                        lastBrokerPrice: Number(bp.last_price || 0)
-                    });
-                }
+                const qty = brokerQty;
+                const sym = cleanSym || rawSym || "UNKNOWN";
+                const ex = String(bp.exchange || "NSE").toUpperCase();
+                const side = qty > 0 ? "BUY" : "SELL";
+                const resolvedToken = brokerToken || upstoxInstrumentService.resolveInstrumentKey({ symbol: sym, exchange: ex }) || `${ex}_EQ|${sym}`;
+                upstoxInstrumentService.registerInstrument(ex, sym, resolvedToken);
+
+                const effectiveAvgPrice = avgPrice > 0 ? avgPrice : (brokerPrice > 0 ? brokerPrice : 0);
+
+                reconciled.push({
+                    key: `BROKER|${resolvedToken}`,
+                    brokerAccountId: bp.brokerAccountId || null,
+                    broker: bp.broker || bp.brokerName || null,
+                    symbol: sym,
+                    exchange: ex,
+                    segment: bp.segment || "EQUITY",
+                    productType: bp.productType || bp.productCode || bp.product || "INTRADAY",
+                    instrumentToken: resolvedToken,
+                    securityId: bp.securityId ? String(bp.securityId) : undefined,
+                    totalBuyQuantity: qty > 0 ? Math.abs(qty) : 0,
+                    totalSellQuantity: qty < 0 ? Math.abs(qty) : 0,
+                    totalBuyValue: effectiveAvgPrice * Math.abs(qty),
+                    totalSellValue: 0,
+                    openQuantity: Math.abs(qty),
+                    netQuantity: qty,
+                    averagePrice: effectiveAvgPrice,
+                    realizedPnL: 0,
+                    status: "OPEN",
+                    side,
+                    openLots: [{
+                        tradeId: "BROKER_SYNC",
+                        side: qty > 0 ? "LONG" : "SHORT",
+                        price: effectiveAvgPrice,
+                        initialQuantity: Math.abs(qty),
+                        remainingQuantity: Math.abs(qty),
+                        tradeDate: new Date()
+                    }],
+                    squaredLots: [],
+                    lastTradeDate: new Date(),
+                    lastBrokerPrice: brokerPrice,
+                    lastPrice: brokerPrice
+                });
             }
         }
 
-        return reconciled;
+        // Drop any fully squared or zero-quantity positions so they never linger in open positions
+        return reconciled.filter(p => p.openQuantity > EPSILON && p.status !== "FULLY_SQUARED" && p.status !== "CLOSED");
     }
 }
 
