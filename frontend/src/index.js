@@ -17,6 +17,7 @@ import CopyTrading from './pages/CopyTrading';
 import BrokerAccounts from './pages/BrokerAccounts';
 import BrokerAccountForm from './pages/BrokerAccountForm';
 import Trades from './pages/Trades';
+import TradingJournal from './pages/TradingJournal'; // ✅ Trading Journal module
 import Analytics from './pages/Analytics';
 import Charges from './pages/Charges';
 import RiskManagement from './pages/RiskManagement';
@@ -45,6 +46,7 @@ const PAGE_META = {
   overview: { title: 'Overview', subtitle: 'Performance dashboard & real-time analytics' },
   'broker-accounts': { title: 'Broker Accounts', subtitle: 'Connected trading accounts & API management' },
   trades: { title: 'Trades', subtitle: 'Trade history, execution logs & position tracking' },
+  journal: { title: 'Trading Journal', subtitle: 'Pre & post-trade review, psychology tracker & strategy performance' }, // ✅ Journal page meta
   analytics: { title: 'Analytics', subtitle: 'Performance breakdown, win-rate & equity curve' },
   charges: { title: 'Charges', subtitle: 'Brokerage, exchange fees & regulatory charges' },
   risk: { title: 'Risk Management', subtitle: 'Position limits, drawdown tracking & rules' },
@@ -78,6 +80,7 @@ function AppRoutes() {
       <Route path="/app/broker-accounts/new" element={<Protected><AppPage page="broker-accounts"><BrokerAccountForm /></AppPage></Protected>} />
       <Route path="/app/broker-accounts/:id/edit" element={<Protected><AppPage page="broker-accounts"><BrokerAccountForm /></AppPage></Protected>} />
       <Route path="/app/trades" element={<Protected><AppPage page="trades"><Trades /></AppPage></Protected>} />
+      <Route path="/app/journal" element={<Protected><AppPage page="journal"><TradingJournal /></AppPage></Protected>} /> {/* ✅ Journal route */}
       <Route path="/app/analytics" element={<Protected><AppPage page="analytics"><Analytics /></AppPage></Protected>} />
       <Route path="/app/charges" element={<Protected><AppPage page="charges"><Charges /></AppPage></Protected>} />
       <Route path="/app/risk" element={<Protected><AppPage page="risk"><RiskManagement /></AppPage></Protected>} />

@@ -1,0 +1,18 @@
+# ✅ Defense-in-depth: Prevent accidental tracking of environment secrets and runtime files
+.env
+.env.*
+.env.local
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Dependencies
+node_modules/
+
+# Uploaded screenshots & attachments
+uploads/
+tmp/
+temp/
+

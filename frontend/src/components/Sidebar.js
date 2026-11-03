@@ -3,7 +3,7 @@ import { NavLink, Link } from 'react-router-dom';
 import {
   Shield, LayoutDashboard, Wallet, ArrowLeftRight, BarChart3,
   Receipt, AlertTriangle, FileText, GitCompare, Settings, X, ChevronLeft,
-  Activity, Copy
+  Activity, Copy, BookOpen // ✅ Added BookOpen for Trading Journal
 } from 'lucide-react';
 
 const NAV_ITEMS = [
@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { to: '/app/overview', label: 'Overview', icon: LayoutDashboard },
   { to: '/app/broker-accounts', label: 'Broker Accounts', icon: Wallet },
   { to: '/app/trades', label: 'Trades', icon: ArrowLeftRight },
+  { to: '/app/journal', label: 'Trading Journal', icon: BookOpen }, // ✅ Added Trading Journal
   { to: '/app/analytics', label: 'Analytics', icon: BarChart3 },
   { to: '/app/charges', label: 'Charges', icon: Receipt },
   { to: '/app/risk', label: 'Risk Management', icon: AlertTriangle },

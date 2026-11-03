@@ -346,6 +346,71 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  // ✅ Trading Journal Endpoints
+  listJournalEntries: (params = {}) => {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '' && v !== 'all' && v !== 'ALL') {
+        query.append(k, v);
+      }
+    });
+    const qs = query.toString();
+    return request(withUserId(`/api/journal${qs ? '?' + qs : ''}`, params.userId || getStoredUserId()));
+  },
+
+  getJournalEntry: (id) =>
+    request(`/api/journal/${encodeURIComponent(id)}`),
+
+  createJournalEntry: (payload) =>
+    request('/api/journal', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  updateJournalEntry: (id, payload) =>
+    request(`/api/journal/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteJournalEntry: (id) =>
+    request(`/api/journal/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  getJournalAnalytics: (range = 'all') =>
+    request(withUserId(`/api/journal/analytics?range=${encodeURIComponent(range)}`, getStoredUserId())),
+
+  getJournalStrategies: () =>
+    request(withUserId('/api/journal/strategies', getStoredUserId())),
+
+  uploadJournalAttachment: async (file) => {
+    const token = localStorage.getItem('tg_token');
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const res = await fetch(`${API_URL}/api/journal/upload`, {
+      method: 'POST',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: formData,
+    });
+
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok) {
+      throw new ApiError(data?.message || `Upload failed (${res.status})`, res.status);
+    }
+
+    return data;
+  },
 };
 
 const WS_URL =

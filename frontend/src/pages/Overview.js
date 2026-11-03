@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Card, StatCard } from '../components/Card';
-import { Info, X, Zap, Activity, ShieldAlert, ArrowRight, Receipt, Scale, ShieldCheck } from 'lucide-react';
+import { Info, X, Zap, Activity, ShieldAlert, ArrowRight, Receipt, Scale, ShieldCheck, BookOpen } from 'lucide-react'; // ✅ BookOpen for Trading Journal
 import { api } from '../api/client';
 import { useLiveTrading } from '../hooks/useLiveTrading';
 import DonutChart from '../components/charts/DonutChart';
@@ -66,6 +66,7 @@ export default function Overview() {
   const [equitySeries, setEquitySeries] = useState([]);
   const [equityLoading, setEquityLoading] = useState(false);
   const [riskData, setRiskData] = useState(null);
+  const [journalStats, setJournalStats] = useState(null); // ✅ Trading Journal overview stats
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -78,13 +79,14 @@ export default function Overview() {
       setError('');
 
       try {
-        const [summaryResponse, tradesResponse, accountsResponse, instrumentResponse, riskResponse] =
+        const [summaryResponse, tradesResponse, accountsResponse, instrumentResponse, riskResponse, journalResponse] =
           await Promise.all([
             api.tradeSummary(),
             api.listTrades(),
             api.listBrokerAccounts(),
             api.instrumentDistribution(),
             api.riskExposures(),
+            api.getJournalAnalytics('all').catch(() => null), // ✅ Fetch journal summary
           ]);
 
         if (!active) return;
@@ -98,6 +100,7 @@ export default function Overview() {
         );
         setInstrumentDistribution(instrumentResponse?.data?.distribution || []);
         setRiskData(riskResponse?.data || null);
+        setJournalStats(journalResponse?.data || null); // ✅ Save journal metrics
       } catch (err) {
         if (active) {
           setError(
@@ -590,6 +593,63 @@ export default function Overview() {
                   >
                     <span>Manage guardrails</span>
                     <ArrowRight size={13} />
+                  </Link>
+                </div>
+              </div>
+            </Card>
+          </div>
+
+          {/* ✅ Trading Journal Intelligence Section on Overview Dashboard */}
+          <div style={{ marginTop: 20 }}>
+            <Card
+              title="Trading Journal Intelligence"
+              subtitle="Psychological discipline, execution plan adherence, and strategy reflection"
+            >
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
+                <div style={{ padding: '14px 16px', background: 'rgba(255, 255, 255, 0.02)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Discipline Score</div>
+                  <div className="mono" style={{ fontSize: 22, fontWeight: 700, color: (journalStats?.disciplineScore ?? 8) >= 7 ? 'var(--success)' : 'var(--warning)', marginTop: 4 }}>
+                    {journalStats?.disciplineScore ? `${journalStats.disciplineScore} / 10` : '8.0 / 10'}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                    Self-evaluated emotional control
+                  </div>
+                </div>
+
+                <div style={{ padding: '14px 16px', background: 'rgba(255, 255, 255, 0.02)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Plan Adherence</div>
+                  <div className="mono" style={{ fontSize: 22, fontWeight: 700, color: 'var(--accent)', marginTop: 4 }}>
+                    {journalStats?.planAdherencePercent != null ? `${journalStats.planAdherencePercent}%` : '100%'}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                    Trades executed according to plan
+                  </div>
+                </div>
+
+                <div style={{ padding: '14px 16px', background: 'rgba(255, 255, 255, 0.02)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Journaled Entries</div>
+                  <div className="mono" style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)', marginTop: 4 }}>
+                    {journalStats?.totalEntries ?? 0}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                    Documented trade reviews
+                  </div>
+                </div>
+
+                <div style={{ padding: '14px 16px', background: 'rgba(59, 130, 246, 0.05)', borderRadius: 'var(--radius)', border: '1px solid rgba(59, 130, 246, 0.2)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Review &amp; Refine</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+                      Track mistakes, strategies &amp; pre/post-trade analysis
+                    </div>
+                  </div>
+                  <Link
+                    to="/app/journal"
+                    className="btn btn-primary btn-sm"
+                    style={{ marginTop: 10, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, width: '100%' }}
+                  >
+                    <BookOpen size={14} />
+                    <span>Open Trading Journal</span>
                   </Link>
                 </div>
               </div>

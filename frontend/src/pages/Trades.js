@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom'; // ✅ Navigation for journal integration
 import { Card } from '../components/Card';
-import { X, ChevronLeft, ChevronRight, Trash2, RefreshCw } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, Trash2, RefreshCw, BookOpen } from 'lucide-react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
 
@@ -46,6 +47,7 @@ function getExecutionId(trade) {
 }
 
 export default function Trades() {
+  const navigate = useNavigate(); // ✅ Navigate to journal
   const toast = useToast();
   const [trades, setTrades] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -542,6 +544,25 @@ export default function Trades() {
                 <span className="detail-value">{value ?? '—'}</span>
               </div>
             ))}
+
+            {/* ✅ Link to Trading Journal module with pre-filled trade data */}
+            <button
+              className="btn btn-primary w-full"
+              style={{
+                marginTop: 18,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                padding: '10px 16px',
+                fontWeight: 600
+              }}
+              onClick={() => {
+                navigate('/app/journal', { state: { prefillTrade: drawerTrade } });
+              }}
+            >
+              <BookOpen size={16} /> Journal This Trade
+            </button>
 
             <button
               className="btn btn-secondary w-full"

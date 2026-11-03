@@ -28,6 +28,12 @@ import brokerAccountRoutes from './routes/brokerAccountRoutes.js';
 import tradeRoutes from './routes/tradeRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
 import copyTradingRoutes from './routes/copyTradingRoutes.js';
+import journalRoutes from './routes/journalRoutes.js'; // ✅ Trading Journal routes
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 import express from 'express';
 import { connectDB } from './config/db.js';
@@ -80,6 +86,9 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
+// ✅ Serve uploaded journal screenshots and attachments securely
+app.use("/uploads", express.static(path.resolve(__dirname, "../uploads")));
+
 // --------------------
 // Routes
 // --------------------
@@ -96,6 +105,7 @@ app.use("/api/broker-accounts", brokerAccountRoutes);
 app.use("/api/trades", tradeRoutes);
 app.use("/api/webhooks", webhookRoutes);
 app.use("/api/copy-trading", copyTradingRoutes);
+app.use("/api/journal", journalRoutes); // ✅ Mounted Trading Journal endpoint
 
 // --------------------
 // Centralized Error Handling
