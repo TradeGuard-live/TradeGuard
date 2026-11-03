@@ -50,6 +50,19 @@ export class BrokerSyncManager {
                 let res = null;
                 const broker = String(acc.broker || "").toUpperCase();
 
+                // ✅ Skip disconnected accounts to avoid unauthorized API calls & retry storms
+                if (!acc.isConnected) {
+                    if (broker !== "KOTAK_NEO") {
+                        continue;
+                    }
+                    let totp = "";
+                    try { totp = decrypt(acc.credentials?.totpSecret); } catch { totp = acc.credentials?.totpSecret; }
+                    const isReusable = totp && !/^\d{6}$/.test(String(totp).trim());
+                    if (!isReusable) {
+                        continue;
+                    }
+                }
+
                 if (broker === "UPSTOX" && acc.credentials?.accessToken) {
                     res = await syncUpstoxTodayTrades({ brokerAccountId: acc._id });
                 } else if (broker === "DHAN" && acc.credentials?.accessToken) {
@@ -116,48 +129,73 @@ export class BrokerSyncManager {
         for (const acc of accounts) {
             const broker = String(acc.broker || "").toUpperCase();
             try {
+                // ✅ Skip disconnected accounts to avoid unauthorized API calls & retry storms
+                if (!acc.isConnected) {
+                    if (broker !== "KOTAK_NEO" && broker !== "ZERODHA" && broker !== "GROWW") {
+                        continue;
+                    }
+                    if (broker === "KOTAK_NEO") {
+                        let totp = "";
+                        try { totp = decrypt(acc.credentials?.totpSecret); } catch { totp = acc.credentials?.totpSecret; }
+                        const isReusable = totp && !/^\d{6}$/.test(String(totp).trim());
+                        if (!isReusable) continue;
+                    }
+                }
+
                 if (broker === "UPSTOX" && acc.credentials?.accessToken) {
                     const token = decrypt(acc.credentials.accessToken);
                     if (token) {
-                        brokerAuth.upstoxToken = token;
                         const upstox = new UpstoxAdapter(token);
+                        let isAuthFailed = false;
                         const pos = await upstox.getPositions().catch(uErr => {
-                            if (uErr.response?.status === 401 || /401|token|expired|invalid/i.test(uErr.message)) {
+                            if (uErr.response?.status === 401 || uErr.status === 401 || /401|token|expired|invalid/i.test(uErr.message)) {
+                                isAuthFailed = true;
                                 acc.isConnected = false;
-                                acc.verificationError = uErr.message;
+                                acc.verificationError = uErr.message || "Upstox access token expired or unauthorized (401)";
                                 acc.save().catch(() => {});
+                                console.warn(`[BrokerSyncManager] Upstox unauthorized (401) for account ${acc._id}. Marked disconnected.`);
                             }
                             return [];
                         });
-                        if (Array.isArray(pos)) {
-                            brokerPositions.push(...pos.map(mapUpstoxPosition).filter(Boolean).map(p => ({
-                                ...p,
-                                broker: "UPSTOX",
-                                brokerAccountId: acc._id
-                            })));
+                        // ✅ Only provide upstoxToken to marketDataEngine if authentication succeeded!
+                        if (!isAuthFailed && acc.isConnected) {
+                            brokerAuth.upstoxToken = token;
+                            if (Array.isArray(pos)) {
+                                brokerPositions.push(...pos.map(mapUpstoxPosition).filter(Boolean).map(p => ({
+                                    ...p,
+                                    broker: "UPSTOX",
+                                    brokerAccountId: acc._id
+                                })));
+                            }
                         }
                     }
                 } else if (broker === "DHAN" && acc.credentials?.accessToken) {
                     const token = decrypt(acc.credentials.accessToken);
                     const clientId = acc.credentials?.clientId;
                     if (token && clientId) {
-                        brokerAuth.dhanToken = token;
-                        brokerAuth.dhanClientId = clientId;
                         const dhan = new DhanAdapter({ clientId, accessToken: token });
+                        let isAuthFailed = false;
                         const pos = await dhan.getPositions().catch(dErr => {
-                            if (dErr.status === 401 || /401|token|expired|invalid/i.test(dErr.message)) {
+                            if (dErr.status === 401 || dErr.response?.status === 401 || /401|token|expired|invalid/i.test(dErr.message)) {
+                                isAuthFailed = true;
                                 acc.isConnected = false;
-                                acc.verificationError = dErr.message;
+                                acc.verificationError = dErr.message || "Dhan access token expired or unauthorized (401)";
                                 acc.save().catch(() => {});
+                                console.warn(`[BrokerSyncManager] Dhan unauthorized (401) for account ${acc._id}. Marked disconnected.`);
                             }
                             return [];
                         });
-                        if (Array.isArray(pos)) {
-                            brokerPositions.push(...pos.map(mapDhanPosition).filter(Boolean).map(p => ({
-                                ...p,
-                                broker: "DHAN",
-                                brokerAccountId: acc._id
-                            })));
+                        // ✅ Only provide dhanToken if authentication succeeded!
+                        if (!isAuthFailed && acc.isConnected) {
+                            brokerAuth.dhanToken = token;
+                            brokerAuth.dhanClientId = clientId;
+                            if (Array.isArray(pos)) {
+                                brokerPositions.push(...pos.map(mapDhanPosition).filter(Boolean).map(p => ({
+                                    ...p,
+                                    broker: "DHAN",
+                                    brokerAccountId: acc._id
+                                })));
+                            }
                         }
                     }
                 } else if (broker === "KOTAK_NEO") {
@@ -256,17 +294,30 @@ export class BrokerSyncManager {
                     const password = acc.credentials?.password ? decrypt(acc.credentials.password) : (acc.credentials?.apiSecret ? decrypt(acc.credentials.apiSecret) : "");
                     const totpSecret = acc.credentials?.totpSecret ? decrypt(acc.credentials.totpSecret) : "";
 
-                    if (token) {
-                        brokerAuth.angelToken = token;
-                        brokerAuth.angelApiKey = apiKey;
+                    if (token && acc.isConnected) {
                         const angel = new AngelOneAdapter({ apiKey, clientCode, password, totpSecret, accessToken: token });
-                        const pos = await angel.getPositions({ noAutoLogin: true }).catch(() => []);
-                        if (Array.isArray(pos)) {
-                            brokerPositions.push(...pos.map(mapAngelOnePosition).filter(Boolean).map(p => ({
-                                ...p,
-                                broker: "ANGEL_ONE",
-                                brokerAccountId: acc._id
-                            })));
+                        let isAuthFailed = false;
+                        const pos = await angel.getPositions({ noAutoLogin: true }).catch(aErr => {
+                            if (aErr.status === 401 || /401|token|expired|invalid/i.test(aErr.message)) {
+                                isAuthFailed = true;
+                                acc.isConnected = false;
+                                acc.verificationError = aErr.message || "Angel One token expired or unauthorized (401)";
+                                acc.save().catch(() => {});
+                                console.warn(`[BrokerSyncManager] Angel One unauthorized (401) for account ${acc._id}. Marked disconnected.`);
+                            }
+                            return [];
+                        });
+                        // ✅ Only provide angelToken if authentication succeeded!
+                        if (!isAuthFailed && acc.isConnected) {
+                            brokerAuth.angelToken = token;
+                            brokerAuth.angelApiKey = apiKey;
+                            if (Array.isArray(pos)) {
+                                brokerPositions.push(...pos.map(mapAngelOnePosition).filter(Boolean).map(p => ({
+                                    ...p,
+                                    broker: "ANGEL_ONE",
+                                    brokerAccountId: acc._id
+                                })));
+                            }
                         }
                     }
                 }

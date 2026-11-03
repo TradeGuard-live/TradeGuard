@@ -131,7 +131,15 @@ export class MarketDataEngine {
         if (upstoxToken) {
             try {
                 // Fetch immediate official REST quote snapshot for all instruments
-                const restQuotes = await upstoxMarketDataService.fetchQuotesRest(upstoxToken, instrumentKeys);
+                let restQuotes = new Map();
+                try {
+                    restQuotes = await upstoxMarketDataService.fetchQuotesRest(upstoxToken, instrumentKeys);
+                } catch (rErr) {
+                    if (rErr.status === 401 || /401|unauthorized/i.test(rErr.message)) {
+                        console.warn(`[MarketDataEngine] Upstox token unauthorized (401) for user ${uId}. Skipping Upstox feed.`);
+                        throw rErr;
+                    }
+                }
 
                 // Broadcast official quotes to subscribers immediately
                 for (const [key, q] of restQuotes.entries()) {
@@ -144,7 +152,7 @@ export class MarketDataEngine {
                 if (session.isOpen) {
                     // Connect live WebSocket feed for streaming updates
                     try {
-                        await upstoxMarketDataService.start(
+                        const startRes = await upstoxMarketDataService.start(
                             uId,
                             upstoxToken,
                             instrumentKeys,
@@ -152,8 +160,13 @@ export class MarketDataEngine {
                                 this.notify(uId, key, ltp, quoteObj);
                             }
                         );
+                        if (startRes && startRes.connected === false && startRes.error) {
+                            console.warn(`[MarketDataEngine] Upstox streamer could not start for ${uId}: ${startRes.error}`);
+                            return;
+                        }
                     } catch (sErr) {
                         console.warn("[MarketDataEngine] Upstox WebSocket streamer notice:", sErr.message);
+                        return;
                     }
 
                     // Periodic REST quote polling (every 3 seconds) as a robust real-time fallback
@@ -184,7 +197,11 @@ export class MarketDataEngine {
                                     }
                                 }
                             } catch (pErr) {
-                                // ignore poll interval error
+                                if (pErr.status === 401 || /401|unauthorized/i.test(pErr.message)) {
+                                    console.warn(`[MarketDataEngine] Upstox REST poller 401 Unauthorized for user ${uId}. Stopping poll timer.`);
+                                    clearInterval(pollTimer);
+                                    this.pollers.delete(uId);
+                                }
                             }
                         }, 3000);
                         this.pollers.set(uId, pollTimer);

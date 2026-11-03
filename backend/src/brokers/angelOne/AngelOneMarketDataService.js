@@ -1,4 +1,5 @@
 import AngelOneAdapter from "./AngelOneAdapter.js";
+import BrokerAccount from "../../models/BrokerAccount.js";
 
 /**
  * AngelOneMarketDataService.js
@@ -83,7 +84,16 @@ class AngelOneMarketDataService {
                             });
                         }
                     } catch (itemErr) {
-                        // ignore individual quote error
+                        const isAuth = itemErr.status === 401 || itemErr.response?.status === 401 || /401|unauthorized|invalid.*token/i.test(itemErr.message);
+                        if (isAuth) {
+                            console.warn(`[AngelOneMarketData] Angel One auth failed (401) for user ${userId}. Stopping polling stream.`);
+                            this.stop(userId);
+                            BrokerAccount.updateMany(
+                                { userId, broker: "ANGEL_ONE" },
+                                { $set: { isConnected: false, verificationError: "Angel One 401 Unauthorized" } }
+                            ).catch(() => {});
+                            return;
+                        }
                     }
                 }
             } catch (err) {

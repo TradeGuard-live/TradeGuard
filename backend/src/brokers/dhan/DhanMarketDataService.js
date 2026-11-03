@@ -1,6 +1,7 @@
 import DhanAdapter from "./DhanAdapter.js";
 import quoteCache from "../../services/marketData/quoteCache.js";
 import upstoxInstrumentService from "../../services/marketData/upstoxInstrumentService.js";
+import BrokerAccount from "../../models/BrokerAccount.js";
 
 /**
  * DhanMarketDataService.js
@@ -210,7 +211,16 @@ class DhanMarketDataService {
                                 return;
                             }
                         } catch (err) {
-                            if (err.status === 401 || err.data?.data?.["806"] || /806|Data APIs not Subscribed/i.test(err.message)) {
+                            if (err.status === 401 || err.response?.status === 401 || /401|unauthorized|invalid.*token/i.test(err.message)) {
+                                console.warn(`[DhanMarketData] Dhan authentication failed (401) for user ${userId}. Stopping polling stream.`);
+                                this.stop(userId);
+                                BrokerAccount.updateMany(
+                                    { userId, broker: "DHAN" },
+                                    { $set: { isConnected: false, verificationError: "Dhan 401 Unauthorized" } }
+                                ).catch(() => {});
+                                return;
+                            }
+                            if (err.data?.data?.["806"] || /806|Data APIs not Subscribed/i.test(err.message)) {
                                 this.hasDataApiMap.set(clientId, false);
                                 console.log("[DhanMarketData] Dhan Data APIs not subscribed (error 806). Using live position PnL tick derivation.");
                             }
@@ -255,8 +265,16 @@ class DhanMarketDataService {
                             }
                         }
                     }
-                } catch {
-                    // Ignore transient position poll error
+                } catch (posErr) {
+                    if (posErr.status === 401 || posErr.response?.status === 401 || /401|unauthorized|invalid.*token/i.test(posErr.message)) {
+                        console.warn(`[DhanMarketData] Dhan positions auth failed (401) for user ${userId}. Stopping polling stream.`);
+                        this.stop(userId);
+                        BrokerAccount.updateMany(
+                            { userId, broker: "DHAN" },
+                            { $set: { isConnected: false, verificationError: "Dhan 401 Unauthorized" } }
+                        ).catch(() => {});
+                        return;
+                    }
                 }
             } catch (err) {
                 // Ignore transient network or off-market polling errors

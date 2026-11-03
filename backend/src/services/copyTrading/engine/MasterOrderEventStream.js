@@ -171,7 +171,12 @@ export class MasterOrderEventStream {
                     }
                 }
             } catch (pollErr) {
-                // Polling error non-blocking
+                const isAuth = pollErr.status === 401 || pollErr.status === 403 || /401|403|unauthorized|expired|invalid.*token/i.test(pollErr.message);
+                if (isAuth) {
+                    console.warn(`[MasterOrderEventStream] Master broker ${masterAdapter.getBroker()} 401/403 for user ${userId}. Stopping stream.`);
+                    await this.stop(userId);
+                    return;
+                }
             }
         }, 1500);
 

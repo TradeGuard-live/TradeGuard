@@ -66,10 +66,15 @@ class UpstoxAdapter {
                 error.response?.data || error.message
             );
 
-            throw new Error(
+            // ✅ Preserve HTTP status code for upstream auth error handling
+            const customError = new Error(
                 error.response?.data?.errors?.[0]?.message ||
                 "Failed to fetch historical trades from Upstox"
             );
+            customError.code = error.code;
+            customError.status = error.response?.status;
+            customError.response = error.response;
+            throw customError;
         }
     }
 
@@ -95,10 +100,15 @@ class UpstoxAdapter {
                 error.response?.data || error.message
             );
 
-            throw new Error(
+            // ✅ Preserve HTTP status code for upstream auth error handling
+            const customError = new Error(
                 error.response?.data?.errors?.[0]?.message ||
                 "Failed to fetch today's trades from Upstox"
             );
+            customError.code = error.code;
+            customError.status = error.response?.status;
+            customError.response = error.response;
+            throw customError;
         }
     }
 

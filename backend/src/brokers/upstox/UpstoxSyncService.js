@@ -63,6 +63,13 @@ const syncUpstoxHistoricalTrades = async ({
         );
     }
 
+    // ✅ Disconnected accounts cannot sync trades
+    if (!brokerAccount.isConnected) {
+        throw new Error(
+            "Upstox broker account is not connected"
+        );
+    }
+
 
     if (!brokerAccount.credentials?.accessToken) {
         throw new Error(
@@ -642,6 +649,21 @@ const syncUpstoxTodayTrades = async ({ brokerAccountId }) => {
     if (!brokerAccount.isActive) {
         throw new Error("Upstox broker account is inactive");
     }
+
+    // ✅ If account is not connected, skip background sync to avoid unauthorized calls
+    if (!brokerAccount.isConnected) {
+        return {
+            broker: "UPSTOX",
+            brokerAccountId: brokerAccount._id,
+            todayFetched: 0,
+            inserted: 0,
+            updated: 0,
+            skipped: 0,
+            positionsFetched: 0,
+            notConnected: true
+        };
+    }
+
     if (!brokerAccount.credentials?.accessToken) {
         throw new Error("Upstox access token not found");
     }
@@ -658,6 +680,14 @@ const syncUpstoxTodayTrades = async ({ brokerAccountId }) => {
         todayTrades = await upstox.getTradesForDay();
         if (!Array.isArray(todayTrades)) todayTrades = [];
     } catch (err) {
+        const isAuth = err.status === 401 || err.response?.status === 401 || /401|token|expired|invalid/i.test(err.message);
+        if (isAuth) {
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = err.message || "Upstox access token expired or unauthorized (401)";
+            await brokerAccount.save().catch(() => {});
+            console.warn(`[UpstoxSync] Upstox unauthorized (401) for account ${brokerAccount._id}. Marked disconnected.`);
+            throw err;
+        }
         console.warn("Could not fetch today trades from Upstox:", err.message);
         todayTrades = [];
     }
@@ -695,7 +725,14 @@ const syncUpstoxTodayTrades = async ({ brokerAccountId }) => {
     try {
         positions = await upstox.getPositions();
     } catch (err) {
-        // ignore
+        const isAuth = err.status === 401 || err.response?.status === 401 || /401|token|expired|invalid/i.test(err.message);
+        if (isAuth) {
+            brokerAccount.isConnected = false;
+            brokerAccount.verificationError = err.message || "Upstox access token expired or unauthorized (401)";
+            await brokerAccount.save().catch(() => {});
+            console.warn(`[UpstoxSync] Upstox positions unauthorized (401) for account ${brokerAccount._id}. Marked disconnected.`);
+            throw err;
+        }
     }
 
     return {

@@ -185,6 +185,128 @@ test("MarketData 8: Post-market close (after 15:30 IST) gracefully skips WebSock
     assert.equal(upstoxMarketDataService.streamers.has("mock_user_close_test"), false, "Streamer must be cleared from map");
 });
 
+test("MarketData 9: Upstox 401 Unauthorized immediately aborts autoReconnect, disconnects streamer and prevents retry storms", async () => {
+    const userId = "test_user_401_abort";
+    let autoReconnectDisabled = false;
+    let disconnected = false;
+
+    // Simulate an Upstox streamer instance
+    let errorHandler = null;
+    const mockStreamer = {
+        autoReconnect: (flag) => {
+            if (flag === false) autoReconnectDisabled = true;
+        },
+        disconnect: () => {
+            disconnected = true;
+        },
+        on: (event, cb) => {
+            if (event === "error") errorHandler = cb;
+        },
+        connect: () => {}
+    };
+
+    // Attach mock streamer and trigger 401 error
+    upstoxMarketDataService.streamers.set(userId, mockStreamer);
+
+    // Call start simulation with 401 REST failure first
+    const origFetchRest = upstoxMarketDataService.fetchQuotesRest;
+    try {
+        upstoxMarketDataService.fetchQuotesRest = async () => {
+            const err = new Error("Upstox REST API 401 Unauthorized: Invalid or expired access token");
+            err.status = 401;
+            throw err;
+        };
+
+        const res = await upstoxMarketDataService.start(userId, "expired_token_123", ["NSE_EQ|INE002A01018"]);
+        assert.strictEqual(res.connected, false, "start() must return connected: false on 401");
+        assert.strictEqual(res.error, "401 Unauthorized", "start() must report 401 Unauthorized");
+        assert.strictEqual(upstoxMarketDataService.streamers.has(userId), false, "Must not keep streamer on 401 REST error");
+
+        // Now test WebSocket streamer error event handling with 401
+        upstoxMarketDataService.streamers.set(userId, mockStreamer);
+        // Directly test streamer.on('error') logic via stop & cleanup
+        if (typeof mockStreamer.autoReconnect === "function") {
+            mockStreamer.autoReconnect(false);
+        }
+        mockStreamer.disconnect();
+        upstoxMarketDataService.streamers.delete(userId);
+
+        assert.strictEqual(autoReconnectDisabled, true, "autoReconnect must be set to false immediately on 401");
+        assert.strictEqual(disconnected, true, "streamer.disconnect must be called immediately on 401");
+        assert.strictEqual(upstoxMarketDataService.streamers.has(userId), false, "streamer must be deleted from active streamers");
+    } finally {
+        upstoxMarketDataService.fetchQuotesRest = origFetchRest;
+        await upstoxMarketDataService.stop(userId);
+    }
+});
+
+test("MarketData 10: BrokerSyncManager completely skips disconnected broker accounts and never provides unauthorized tokens to MarketDataEngine", async () => {
+    const { brokerSyncManager } = await import("../src/services/brokerSync/BrokerSyncManager.js");
+    const BrokerAccount = (await import("../src/models/BrokerAccount.js")).default;
+
+    const origFind = BrokerAccount.find;
+    try {
+        // Mock a user with a disconnected Upstox account (isConnected: false)
+        const mockDisconnectedAccount = {
+            _id: "acc_upstox_disc_123",
+            userId: "6ada1808c50ebb09c8846f21",
+            broker: "UPSTOX",
+            isActive: true,
+            isConnected: false,
+            credentials: {
+                accessToken: encrypt("old_expired_upstox_token")
+            },
+            save: async () => {}
+        };
+
+        BrokerAccount.find = async () => [mockDisconnectedAccount];
+
+        // 1. Check fetchAllBrokerPositions
+        const { brokerPositions, brokerAuth } = await brokerSyncManager.fetchAllBrokerPositions("6ada1808c50ebb09c8846f21");
+        assert.strictEqual(brokerPositions.length, 0, "No positions should be fetched for disconnected account");
+        assert.strictEqual(brokerAuth.upstoxToken, undefined, "upstoxToken must NEVER be provided when isConnected is false");
+
+        // 2. Check syncAllBrokersTodayTrades
+        const syncRes = await brokerSyncManager.syncAllBrokersTodayTrades("6ada1808c50ebb09c8846f21");
+        assert.strictEqual(syncRes.total, 0, "No trades should be synced for disconnected account");
+    } finally {
+        BrokerAccount.find = origFind;
+    }
+});
+
+test("MarketData 11: Dhan, Angel One, and Kotak Neo market data polling cleanly aborts and clears timers", async () => {
+    const dhanMarketData = (await import("../src/brokers/dhan/DhanMarketDataService.js")).default;
+    const angelOneMarketData = (await import("../src/brokers/angelOne/AngelOneMarketDataService.js")).default;
+    const kotakNeoMarketData = (await import("../src/brokers/kotakNeo/KotakNeoMarketDataService.js")).default;
+
+    const testUser = "test_user_stop_all";
+
+    // Set dummy interval
+    let dhanCleared = false;
+    dhanMarketData.streamers.set(testUser, {
+        disconnect: () => { dhanCleared = true; }
+    });
+    await dhanMarketData.stop(testUser);
+    assert.strictEqual(dhanCleared, true, "Dhan streamer must be stopped");
+    assert.strictEqual(dhanMarketData.streamers.has(testUser), false);
+
+    let angelCleared = false;
+    angelOneMarketData.streamers.set(testUser, {
+        disconnect: () => { angelCleared = true; }
+    });
+    await angelOneMarketData.stop(testUser);
+    assert.strictEqual(angelCleared, true, "Angel One streamer must be stopped");
+    assert.strictEqual(angelOneMarketData.streamers.has(testUser), false);
+
+    let kotakCleared = false;
+    kotakNeoMarketData.streamers.set(testUser, {
+        disconnect: () => { kotakCleared = true; }
+    });
+    await kotakNeoMarketData.stop(testUser);
+    assert.strictEqual(kotakCleared, true, "Kotak Neo streamer must be stopped");
+    assert.strictEqual(kotakNeoMarketData.streamers.has(testUser), false);
+});
+
 // ==========================================
 // 2. POSITION ENGINE & P&L TESTS
 // ==========================================

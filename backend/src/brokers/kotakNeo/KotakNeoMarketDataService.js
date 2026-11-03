@@ -1,4 +1,5 @@
 import KotakNeoAdapter from "./KotakNeoAdapter.js";
+import BrokerAccount from "../../models/BrokerAccount.js";
 
 /**
  * KotakNeoMarketDataService.js
@@ -112,7 +113,16 @@ class KotakNeoMarketDataService {
                             }
                         }
                     } catch (batchErr) {
-                        // ignore batch query errors
+                        const isAuth = batchErr.status === 401 || batchErr.errorCode === 1003 || /401|session|token|unauthorized/i.test(batchErr.message);
+                        if (isAuth) {
+                            console.warn(`[KotakNeoMarketData] Kotak Neo auth failed (401) for user ${userId}. Stopping polling stream.`);
+                            this.stop(userId);
+                            BrokerAccount.updateMany(
+                                { userId, broker: "KOTAK_NEO" },
+                                { $set: { isConnected: false, verificationError: "Kotak Neo session expired / 401 Unauthorized" } }
+                            ).catch(() => {});
+                            return;
+                        }
                     }
                 }
             } catch (err) {

@@ -32,6 +32,19 @@ const syncDhanHistoricalTrades = async ({
         throw new Error("Dhan broker account is inactive");
     }
 
+    // ✅ If account is not connected, skip background sync to avoid unauthorized calls
+    if (!brokerAccount.isConnected) {
+        return {
+            broker: "DHAN",
+            brokerAccountId: brokerAccount._id,
+            totalFetched: 0,
+            inserted: 0,
+            updated: 0,
+            skipped: 0,
+            notConnected: true
+        };
+    }
+
     if (!brokerAccount.credentials?.accessToken) {
         throw new Error("Dhan access token not found");
     }

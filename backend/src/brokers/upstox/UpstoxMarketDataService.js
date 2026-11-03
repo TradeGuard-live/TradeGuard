@@ -12,6 +12,7 @@
 import UpstoxClient from "upstox-js-sdk";
 import axios from "axios";
 import { createRequire } from "module";
+import BrokerAccount from "../../models/BrokerAccount.js";
 import quoteCache from "../../services/marketData/quoteCache.js";
 import upstoxInstrumentService from "../../services/marketData/upstoxInstrumentService.js";
 import { getMarketSession } from "../../services/marketData/marketSessionService.js";
@@ -71,6 +72,12 @@ class UpstoxMarketDataService {
                     }
                 });
             } catch (err) {
+                const is401 = err.response?.status === 401 || /401|unauthorized|invalid.*token/i.test(err.message);
+                if (is401) {
+                    const authErr = new Error("Upstox REST API 401 Unauthorized: Invalid or expired access token");
+                    authErr.status = 401;
+                    throw authErr;
+                }
                 // Fallback to /market-quote/ltp
                 try {
                     response = await this.restClient.get("/market-quote/ltp", {
@@ -82,6 +89,12 @@ class UpstoxMarketDataService {
                         }
                     });
                 } catch (ltpErr) {
+                    const isLtp401 = ltpErr.response?.status === 401 || /401|unauthorized|invalid.*token/i.test(ltpErr.message);
+                    if (isLtp401) {
+                        const authErr = new Error("Upstox REST API 401 Unauthorized: Invalid or expired access token");
+                        authErr.status = 401;
+                        throw authErr;
+                    }
                     console.warn("[UpstoxMarketData] REST quotes & LTP fetch notice:", ltpErr.response?.data?.message || ltpErr.message);
                     return new Map();
                 }
@@ -153,7 +166,18 @@ class UpstoxMarketDataService {
         await this.stop(uId);
 
         // First, fetch snapshot quotes via REST API
-        await this.fetchQuotesRest(accessToken, instrumentKeys);
+        try {
+            await this.fetchQuotesRest(accessToken, instrumentKeys);
+        } catch (restErr) {
+            if (restErr.status === 401 || /401|unauthorized/i.test(restErr.message)) {
+                console.warn(`[UpstoxMarketData] Upstox token unauthorized (401) for user ${uId}. WebSocket connection aborted.`);
+                BrokerAccount.updateMany(
+                    { userId: uId, broker: "UPSTOX" },
+                    { $set: { isConnected: false, verificationError: "Upstox token unauthorized or expired (401)" } }
+                ).catch(() => {});
+                return { connected: false, error: "401 Unauthorized" };
+            }
+        }
 
         // Ensure session allows streaming (no pointless connection when exchange is closed)
         const session = getMarketSession("NSE", "EQUITY");
@@ -235,6 +259,30 @@ class UpstoxMarketDataService {
             });
 
             streamer.on("error", (err) => {
+                const msg = err?.message || String(err);
+                const is401 = msg.includes("401") || /unauthorized|invalid.*token/i.test(msg);
+
+                // ✅ Critical Fix: Terminate immediately on 401 Unauthorized to stop reconnect retry loops!
+                if (is401) {
+                    console.warn(`[UpstoxMarketData] Stream authentication failed (401 Unauthorized) for user ${uId}: ${msg}. Terminating streamer and cancelling auto-reconnect.`);
+                    try {
+                        if (typeof streamer.autoReconnect === "function") {
+                            streamer.autoReconnect(false);
+                        }
+                    } catch (e) {}
+                    try {
+                        streamer.disconnect();
+                    } catch (e) {}
+                    this.streamers.delete(uId);
+
+                    // Mark Upstox account disconnected in DB
+                    BrokerAccount.updateMany(
+                        { userId: uId, broker: "UPSTOX" },
+                        { $set: { isConnected: false, verificationError: "Upstox WebSocket returned 401 Unauthorized" } }
+                    ).catch(() => {});
+                    return;
+                }
+
                 const currentSession = getMarketSession("NSE", "EQUITY");
                 if (!currentSession.isOpen) {
                     try {
@@ -248,7 +296,6 @@ class UpstoxMarketDataService {
                     this.streamers.delete(uId);
                     return;
                 }
-                const msg = err?.message || String(err);
                 if (msg.includes("socket hang up") || msg.includes("EHOSTUNREACH")) {
                     console.warn(`[UpstoxMarketData] Connection notice for ${uId}: ${msg}`);
                 } else {
@@ -257,6 +304,10 @@ class UpstoxMarketDataService {
             });
 
             streamer.on("close", () => {
+                if (!this.streamers.has(uId)) {
+                    // Already closed/cleaned up
+                    return;
+                }
                 const currentSession = getMarketSession("NSE", "EQUITY");
                 if (!currentSession.isOpen) {
                     console.log(`[UpstoxMarketData] Market closed (${currentSession.session}). Stopping auto-reconnect for ${uId}.`);
