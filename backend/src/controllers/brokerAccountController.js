@@ -219,18 +219,15 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
             }
         }
 
-        const apiKey = brokerAccount.credentials?.apiKey ? decrypt(brokerAccount.credentials.apiKey) : "";
+        const apiKey = brokerAccount.credentials?.apiKey ? (decrypt(brokerAccount.credentials.apiKey) || (!brokerAccount.credentials.apiKey.startsWith("v1:") && !brokerAccount.credentials.apiKey.startsWith("U2FsdGVk") ? brokerAccount.credentials.apiKey : "")) : "";
         const clientCode = brokerAccount.credentials?.clientId || "";
-        const mobileNumber = brokerAccount.credentials?.mobileNumber ? decrypt(brokerAccount.credentials.mobileNumber) : "";
-        const password = brokerAccount.credentials?.password 
-            ? decrypt(brokerAccount.credentials.password) 
-            : (brokerAccount.credentials?.apiSecret ? decrypt(brokerAccount.credentials.apiSecret) : "");
-        const totpSecret = brokerAccount.credentials?.totpSecret 
-            ? decrypt(brokerAccount.credentials.totpSecret) 
-            : "";
-        const sid = brokerAccount.credentials?.sid 
-            ? decrypt(brokerAccount.credentials.sid) 
-            : (brokerAccount.credentials?.feedToken ? decrypt(brokerAccount.credentials.feedToken) : "");
+        const mobileNumber = brokerAccount.credentials?.mobileNumber ? (decrypt(brokerAccount.credentials.mobileNumber) || (!brokerAccount.credentials.mobileNumber.startsWith("v1:") && !brokerAccount.credentials.mobileNumber.startsWith("U2FsdGVk") ? brokerAccount.credentials.mobileNumber : "")) : "";
+        const rawPass = brokerAccount.credentials?.password || brokerAccount.credentials?.apiSecret || "";
+        const password = rawPass ? (decrypt(rawPass) || (!rawPass.startsWith("v1:") && !rawPass.startsWith("U2FsdGVk") ? rawPass : "")) : "";
+        const rawTotp = brokerAccount.credentials?.totpSecret || "";
+        const totpSecret = rawTotp ? (decrypt(rawTotp) || (!rawTotp.startsWith("v1:") && !rawTotp.startsWith("U2FsdGVk") ? rawTotp : "")) : "";
+        const rawSid = brokerAccount.credentials?.sid || brokerAccount.credentials?.feedToken || "";
+        const sid = rawSid ? (decrypt(rawSid) || (!rawSid.startsWith("v1:") && !rawSid.startsWith("U2FsdGVk") ? rawSid : "")) : "";
         const baseUrl = brokerAccount.credentials?.baseUrl || "https://cis.kotaksecurities.com";
 
         // If no token and not enough credentials to perform login, set disconnected

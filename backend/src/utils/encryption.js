@@ -17,9 +17,7 @@ const getDerivedKey = () => {
     return crypto.createHash("sha256").update(rawKey).digest();
 };
 
-const getLegacyKey = () => {
-    return process.env.ENCRYPTION_KEY || "fcc3ae5999dc642c5d77ea0d035ae611d04723e1c8d4a8fb93dbda738b22e4d8";
-};
+const DEFAULT_LEGACY_KEY = "fcc3ae5999dc642c5d77ea0d035ae611d04723e1c8d4a8fb93dbda738b22e4d8";
 
 /**
  * Encrypts sensitive text using authenticated AES-256-GCM.
@@ -27,8 +25,10 @@ const getLegacyKey = () => {
  * ✅ Implements authenticated AES-256-GCM encryption with 96-bit random IV & auth tag
  */
 export const encrypt = (text) => {
-    if (!text) return text;
+    if (!text) return "";
     const str = String(text);
+    if (!str) return "";
+
     // Avoid double encryption if already formatted
     if (str.startsWith("v1:") && str.split(":").length === 4) {
         return str;
@@ -46,13 +46,14 @@ export const encrypt = (text) => {
 
 /**
  * Decrypts ciphertext. Supports authenticated AES-256-GCM and backward-compatible legacy CryptoJS AES.
- * ✅ Supports authenticated AES-256-GCM with backward-compatible legacy CryptoJS decryption
+ * Never silently returns encrypted ciphertext as plaintext.
  */
 export const decrypt = (encryptedText) => {
-    if (!encryptedText) return "";
-    const str = String(encryptedText);
+    if (!encryptedText || typeof encryptedText !== "string") return "";
+    const str = encryptedText.trim();
+    if (!str) return "";
 
-    // Format check for v1 AES-256-GCM
+    // 1. Format check for versioned AES-256-GCM (v1:)
     if (str.startsWith("v1:")) {
         const parts = str.split(":");
         if (parts.length === 4) {
@@ -71,19 +72,36 @@ export const decrypt = (encryptedText) => {
                 return "";
             }
         }
+        return "";
     }
 
-    // Fallback: Legacy CryptoJS AES decryption for existing data
-    try {
-        const legacyKey = getLegacyKey();
-        const bytes = CryptoJS.AES.decrypt(str, legacyKey);
-        const originalText = bytes.toString(CryptoJS.enc.Utf8);
-        if (originalText) return originalText;
-    } catch {
-        // Continue
+    // 2. Reject other/unsupported version prefixes (e.g. "v2:", "v99:")
+    if (/^v\d+:/i.test(str)) {
+        return "";
     }
 
-    return str;
+    // 3. Fallback: Legacy CryptoJS AES decryption for existing credentials
+    // Candidate keys: custom environment key first, then default legacy key
+    const candidateKeys = [];
+    if (process.env.ENCRYPTION_KEY && process.env.ENCRYPTION_KEY !== DEFAULT_LEGACY_KEY) {
+        candidateKeys.push(process.env.ENCRYPTION_KEY);
+    }
+    candidateKeys.push(DEFAULT_LEGACY_KEY);
+
+    for (const key of candidateKeys) {
+        try {
+            const bytes = CryptoJS.AES.decrypt(str, key);
+            const originalText = bytes.toString(CryptoJS.enc.Utf8);
+            if (originalText && originalText.length > 0) {
+                return originalText;
+            }
+        } catch {
+            // Continue to next candidate key
+        }
+    }
+
+    // Never return the raw encrypted ciphertext as plaintext
+    return "";
 };
 
 export default {

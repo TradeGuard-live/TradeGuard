@@ -61,7 +61,9 @@ const tradeRecordSchema = new mongoose.Schema(
             enum: [
                 "EQUITY",
                 "FUTURES",
-                "OPTIONS"
+                "OPTIONS",
+                "COMMODITY",
+                "CURRENCY"
             ]
         },
 

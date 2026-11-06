@@ -20,14 +20,15 @@ A complete, institutional-grade journal tailored for discipline and self-reflect
 
 ### 2. ⚡ Multi-Broker Trade Synchronization & Order Management
 Unifies trade books, order histories, and open positions across India's leading stock brokers:
-- **Supported Brokers**:
-  - **Upstox** (API v2 OAuth2)
-  - **Dhan** (Data API / Ticker / Position P&L)
-  - **Angel One** (SmartAPI)
-  - **Kotak Neo** (CIS Batch Quotes / TOTP authentication)
-  - **Groww** (SHA256 signature authentication)
-  - **Zerodha Kite Connect**
-  - **Mock / Simulation Broker**
+- **Active Supported Brokers**:
+  - **Upstox** (API v2 / v3 OAuth2 & Protobuf WebSocket)
+  - **Dhan** (HQ API v2 / Data API / Position P&L)
+  - **Angel One** (SmartAPI WebSocket & CSV imports)
+  - **Groww** (SHA256 signature authentication & portfolio sync)
+  - **Zerodha Kite Connect v3**
+  - **Mock / Simulation Broker** (In-memory deterministic test & copy trading engine)
+- **Legacy & Archived Support**:
+  - **Kotak Neo**: Deprecated / inactive integration. Live automated order placement and new credential connection are disabled; existing historical trade records, tax P&L statements, and charges calculation plans (`KOTAK_NEO_TRADE_FREE`, `KOTAK_NEO_YOUTH`) remain fully supported.
 - **Automated Sync**: Background polling and WebSocket-assisted trade book synchronization.
 - **Smart Disconnect & Reconnect Protection**: Zero retry storms on expired or invalid tokens (401/403); automatically disengages streamers and isolates accounts without blocking application state.
 
@@ -53,12 +54,12 @@ Unifies trade books, order histories, and open positions across India's leading 
 graph TD
     Client[React Frontend / SPA] <-->|REST API + WebSockets| Server[Express.js / Node.js Backend]
     Server <-->|Mongoose ODM| DB[(MongoDB Atlas / Local)]
-    Server <-->|Market Data WS / REST| Upstox[Upstox API v2]
+    Server <-->|Market Data WS / REST| Upstox[Upstox API v2/v3]
     Server <-->|Order & Position APIs| Dhan[Dhan HQ]
     Server <-->|SmartAPI| AngelOne[Angel One]
-    Server <-->|CIS Quotes / TOTP| KotakNeo[Kotak Neo]
     Server <-->|Order Book| Zerodha[Zerodha Kite]
-    Server <-->|API| Groww[Groww]
+    Server <-->|Portfolio API| Groww[Groww]
+    KotakArchive[(Kotak Neo Historical Archives)] -.->|Read-Only P&L| Server
 ```
 
 - **Frontend**: React 18, React Router v6, Lucide React, Modern CSS Design System.

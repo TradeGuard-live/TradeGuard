@@ -8,24 +8,28 @@ on:
 
 jobs:
   backend-test:
-    name: Backend Test Suite
+    name: Backend Test Suite & Security Audit
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 20 LTS
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
           cache: 'npm'
-          cache-dependency-path: backend/package.json
+          cache-dependency-path: backend/package-lock.json
 
       - name: Install Backend Dependencies
         working-directory: backend
         run: npm ci
 
-      - name: Run Backend Tests
+      - name: Backend Dependency Audit
+        working-directory: backend
+        run: npm audit --omit=dev --audit-level=critical || true
+
+      - name: Run Complete Backend Test Suite
         working-directory: backend
         env:
           NODE_ENV: test
@@ -34,30 +38,33 @@ jobs:
         run: npm test
 
   frontend-test-and-build:
-    name: Frontend Test & Build
+    name: Frontend Test & Production Build
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 20 LTS
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
           cache: 'npm'
-          cache-dependency-path: frontend/package.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install Frontend Dependencies
         working-directory: frontend
         run: npm ci
 
-      - name: Run Frontend Tests
+      - name: Frontend Dependency Audit
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=critical || true
+
+      - name: Run Complete Frontend Test Suite
         working-directory: frontend
         env:
           CI: true
-        run: npm test
+        run: npm test -- --watchAll=false
 
       - name: Build Frontend Production Bundle
         working-directory: frontend
         run: npm run build
-

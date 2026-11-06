@@ -188,3 +188,157 @@ test("MarketData Regression 6: ExcludeExpiredIntraday excludes stale intraday tr
     assert.equal(openPositions[0].symbol, "HDFCBANK");
     assert.equal(openPositions.find(p => p.symbol === "HDFCLIFE"), undefined, "Expired yesterday intraday trade must be excluded");
 });
+
+test("MarketData Regression 7: Newer quote followed by missing timestamp cannot overwrite verified price", () => {
+    quoteCache.clear();
+    const key = "NSE_EQ|INFY";
+    const verifiedTime = new Date("2026-11-06T11:00:00.000+05:30").getTime();
+
+    // 1. First ingest a verified quote with valid timestamp
+    const res1 = quoteCache.updateQuote(key, {
+        ltp: 1850.00,
+        timestamp: verifiedTime,
+        source: "UPSTOX_WS"
+    });
+    assert.equal(res1.accepted, true);
+
+    // 2. Incoming update has missing/null timestamp
+    const res2 = quoteCache.updateQuote(key, {
+        ltp: 1820.00, // fabricated or unverified price
+        timestamp: null,
+        source: "POLLING_NO_TS"
+    });
+
+    assert.equal(res2.accepted, false, "Quote with missing timestamp must not overwrite newer verified quote");
+    assert.equal(res2.reason, "MISSING_TIMESTAMP_OVERWRITE_PREVENTED");
+
+    // Verified price must remain unchanged
+    const cached = quoteCache.getQuote(key);
+    assert.equal(cached.lastPrice, 1850.00, "Price must remain preserved");
+    assert.equal(cached.lastPriceAt, verifiedTime);
+});
+
+test("MarketData Regression 8: Missing timestamp with NO existing quote is stored with lastPriceAt: null and not LIVE", () => {
+    quoteCache.clear();
+    const key = "NSE_EQ|SBIN";
+
+    // Quote with no timestamp arrives for a symbol not yet in cache
+    const res = quoteCache.updateQuote(key, {
+        ltp: 820.00,
+        source: "INITIAL_SEED"
+    });
+
+    assert.equal(res.accepted, true, "New quote with missing timestamp should be accepted as baseline");
+    const cached = quoteCache.getQuote(key);
+    assert.equal(cached.lastPrice, 820.00);
+    assert.equal(cached.lastPriceAt, null, "lastPriceAt must be null without provider timestamp");
+    assert.notEqual(cached.quoteFreshness, "LIVE", "Must never classify quote as LIVE without freshness timestamp evidence");
+});
+
+test("MarketData Regression 9: Malformed timestamp values are rejected explicitly", () => {
+    quoteCache.clear();
+    const key = "NSE_EQ|WIPRO";
+
+    const malformedCases = [
+        { ltp: 550, timestamp: "invalid-date-string" },
+        { ltp: 550, timestamp: -99999 },
+        { ltp: 550, lastPriceAt: NaN }
+    ];
+
+    for (const testCase of malformedCases) {
+        const res = quoteCache.updateQuote(key, testCase);
+        assert.equal(res.accepted, false, `Malformed timestamp ${testCase.timestamp} must be rejected`);
+        assert.equal(res.reason, "MALFORMED_TIMESTAMP");
+    }
+});
+
+test("MarketData Regression 10: Duplicate updates with identical timestamp preserve cache and quote source", () => {
+    quoteCache.clear();
+    const key = "NSE_EQ|ITC";
+    const ts = new Date("2026-11-06T10:15:00.000+05:30").getTime();
+
+    const res1 = quoteCache.updateQuote(key, { ltp: 490.00, timestamp: ts, source: "WS" });
+    assert.equal(res1.accepted, true);
+
+    // Duplicate update with same timestamp
+    const res2 = quoteCache.updateQuote(key, { ltp: 490.00, timestamp: ts, source: "WS" });
+    assert.equal(res2.accepted, true);
+
+    const cached = quoteCache.getQuote(key);
+    assert.equal(cached.lastPrice, 490.00);
+    assert.equal(cached.lastPriceAt, ts);
+    assert.equal(cached.quoteSource, "WS");
+});
+
+test("MarketData Regression 11: REST vs WebSocket race condition - delayed REST rejected after fast WS update", () => {
+    quoteCache.clear();
+    const key = "NSE_EQ|BAJFINANCE";
+
+    const wsTime = new Date("2026-11-06T11:45:02.000+05:30").getTime();
+    const restDelayedTime = new Date("2026-11-06T11:45:00.000+05:30").getTime();
+
+    // 1. Fast WebSocket tick arrives first at 11:45:02
+    const wsRes = quoteCache.updateQuote(key, {
+        ltp: 7200.00,
+        timestamp: wsTime,
+        source: "UPSTOX_WS"
+    });
+    assert.equal(wsRes.accepted, true);
+
+    // 2. Delayed REST response from earlier in-flight request arrives at 11:45:00
+    const restRes = quoteCache.updateQuote(key, {
+        ltp: 7185.00,
+        timestamp: restDelayedTime,
+        source: "UPSTOX_REST"
+    });
+    assert.equal(restRes.accepted, false, "Delayed REST quote must be rejected");
+    assert.equal(restRes.reason, "STALE_TIMESTAMP");
+
+    // Ensure WS price is preserved
+    const cached = quoteCache.getQuote(key);
+    assert.equal(cached.lastPrice, 7200.00);
+    assert.equal(cached.quoteSource, "UPSTOX_WS");
+});
+
+test("MarketData Regression 12: parseUpstoxTimestamp prioritizes exchange execution time and never fabricates Date.now()", () => {
+    // 1. Missing timestamp returns null (never new Date())
+    assert.equal(parseUpstoxTimestamp(null), null);
+    assert.equal(parseUpstoxTimestamp({}), null);
+    assert.equal(parseUpstoxTimestamp(""), null);
+    assert.equal(parseUpstoxTimestamp("invalid-date-xyz"), null);
+
+    // 2. Exchange execution timestamp takes priority over order placement timestamp
+    const tradeObj = {
+        order_timestamp: "2026-11-06 09:15:00",
+        exchange_timestamp: "2026-11-06 09:15:05"
+    };
+    const parsed = parseUpstoxTimestamp(tradeObj);
+    assert.ok(parsed instanceof Date);
+    // 09:15:05 IST = 03:45:05 UTC
+    assert.equal(parsed.toISOString(), "2026-11-06T03:45:05.000Z");
+
+    // 3. Epoch ms and epoch seconds handling
+    const epochMs = 1730865300000;
+    assert.equal(parseUpstoxTimestamp(epochMs).getTime(), epochMs);
+    assert.equal(parseUpstoxTimestamp(Math.round(epochMs / 1000)).getTime(), epochMs);
+});
+
+test("MarketData Regression 13: mapUpstoxInstrumentSegment supports all 5 segments and rejects ambiguous instruments", async () => {
+    const { mapUpstoxInstrumentSegment } = await import("../src/brokers/upstox/UpstoxMapper.js");
+
+    // 1. Authoritative instrument types
+    assert.equal(mapUpstoxInstrumentSegment({ instrument_type: "EQ" }), "EQUITY");
+    assert.equal(mapUpstoxInstrumentSegment({ instrument_type: "FUTSTK" }), "FUTURES");
+    assert.equal(mapUpstoxInstrumentSegment({ instrument_type: "OPTIDX" }), "OPTIONS");
+    assert.equal(mapUpstoxInstrumentSegment({ instrument_type: "CUR" }), "CURRENCY");
+    assert.equal(mapUpstoxInstrumentSegment({ instrument_type: "COM" }), "COMMODITY");
+
+    // 2. Authoritative exchange
+    assert.equal(mapUpstoxInstrumentSegment({ exchange: "MCX", symbol: "GOLD" }), "COMMODITY");
+    assert.equal(mapUpstoxInstrumentSegment({ exchange: "CDS", symbol: "USDINR" }), "CURRENCY");
+
+    // 3. Reject ambiguous / unidentifiable instruments
+    assert.equal(mapUpstoxInstrumentSegment(null), null);
+    assert.equal(mapUpstoxInstrumentSegment({}), null);
+    assert.equal(mapUpstoxInstrumentSegment({ symbol: "MYSTERY_XYZ" }), null);
+});

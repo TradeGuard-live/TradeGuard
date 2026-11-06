@@ -26,6 +26,48 @@ test("Security Audit 1: AES-256-GCM authenticated encryption produces versioned 
 
     const tamperedDecrypted = decrypt(tamperedCiphertext);
     assert.equal(tamperedDecrypted, "", "Tampered ciphertext must fail authentication and decrypt to empty string");
+
+    // Tamper with auth tag
+    const tamperedTag = (parts[2].slice(-2) === "00" ? "11" : "00") + parts[2].slice(2);
+    const tamperedTagCiphertext = `${parts[0]}:${parts[1]}:${tamperedTag}:${parts[3]}`;
+    assert.equal(decrypt(tamperedTagCiphertext), "", "Tampered auth tag must fail authentication and decrypt to empty string");
+});
+
+test("Security Audit 1b: Encryption regression suite - legacy CryptoJS, missing, invalid versions, empty inputs", async () => {
+    const CryptoJS = (await import("crypto-js")).default;
+    const testSecret = "test_upstox_oauth2_token_xyz987";
+
+    // 1. Legacy ciphertext encrypted with default legacy key
+    const defaultLegacyKey = "fcc3ae5999dc642c5d77ea0d035ae611d04723e1c8d4a8fb93dbda738b22e4d8";
+    const legacyCiphertext = CryptoJS.AES.encrypt(testSecret, defaultLegacyKey).toString();
+    assert.equal(decrypt(legacyCiphertext), testSecret, "Legacy CryptoJS ciphertext must cleanly decrypt");
+
+    // 2. Legacy ciphertext encrypted with current process.env.ENCRYPTION_KEY (if set)
+    if (process.env.ENCRYPTION_KEY) {
+        const envLegacyCiphertext = CryptoJS.AES.encrypt(testSecret, process.env.ENCRYPTION_KEY).toString();
+        assert.equal(decrypt(envLegacyCiphertext), testSecret, "Legacy ciphertext with env key must decrypt");
+    }
+
+    // 3. Legacy ciphertext encrypted with unknown/wrong key must fail and return empty string (NEVER return ciphertext)
+    const wrongKeyCiphertext = CryptoJS.AES.encrypt(testSecret, "totally_unknown_key_9999").toString();
+    const wrongKeyDecrypted = decrypt(wrongKeyCiphertext);
+    assert.equal(wrongKeyDecrypted, "", "Wrong key legacy ciphertext must return empty string");
+    assert.notEqual(wrongKeyDecrypted, wrongKeyCiphertext, "Ciphertext must never be returned as plaintext");
+
+    // 4. Missing ciphertext (null, undefined, empty string, whitespace)
+    assert.equal(decrypt(null), "", "decrypt(null) must return empty string");
+    assert.equal(decrypt(undefined), "", "decrypt(undefined) must return empty string");
+    assert.equal(decrypt(""), "", "decrypt('') must return empty string");
+    assert.equal(decrypt("   "), "", "decrypt('   ') must return empty string");
+
+    // 5. Invalid or unsupported version prefix (e.g. v2:, v99:)
+    assert.equal(decrypt("v2:fakeiv:faketag:fakecipher"), "", "Unsupported version 'v2:' must return empty string");
+    assert.equal(decrypt("v99:123:456:789"), "", "Unsupported version 'v99:' must return empty string");
+
+    // 6. Empty plaintext encryption
+    assert.equal(encrypt(""), "", "encrypt('') must return empty string");
+    assert.equal(encrypt(null), "", "encrypt(null) must return empty string");
+    assert.equal(encrypt(undefined), "", "encrypt(undefined) must return empty string");
 });
 
 test("Security Audit 2: SanitizeCsvCell neutralizes CSV formula injection prefixes (=, +, -, @, \\t, \\r)", () => {

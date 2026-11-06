@@ -93,10 +93,21 @@ export class QuoteCache {
         }
 
         // Provider timestamp (last trade execution timestamp from exchange)
-        const rawTime = data.lastPriceAt !== undefined ? data.lastPriceAt : (data.timestamp || data.time || data.ltt);
+        const hasExplicitTimeField = data.lastPriceAt !== undefined || data.timestamp !== undefined || data.time !== undefined || data.ltt !== undefined;
+        const rawTime = data.lastPriceAt !== undefined ? data.lastPriceAt : (data.timestamp ?? data.time ?? data.ltt);
         const quoteTime = this.normalizeTimestamp(rawTime);
 
-        // Timestamp ordering check: Prevent delayed or out-of-order responses from overwriting newer quotes
+        // 1. If timestamp was explicitly provided but malformed, reject it
+        if (hasExplicitTimeField && rawTime !== null && rawTime !== undefined && quoteTime === null) {
+            return { accepted: false, reason: "MALFORMED_TIMESTAMP" };
+        }
+
+        // 2. Prevent a quote with unknown/missing timestamp from overwriting a newer verified timestamped quote
+        if (existing && existing.lastPriceAt && !quoteTime) {
+            return { accepted: false, reason: "MISSING_TIMESTAMP_OVERWRITE_PREVENTED" };
+        }
+
+        // 3. Timestamp ordering check: Prevent delayed or out-of-order responses from overwriting newer quotes
         if (existing && existing.lastPriceAt && quoteTime && quoteTime < existing.lastPriceAt) {
             return { accepted: false, reason: "STALE_TIMESTAMP" };
         }
