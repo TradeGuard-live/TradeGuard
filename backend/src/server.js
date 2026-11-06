@@ -4,11 +4,12 @@ if (dns && typeof dns.setDefaultResultOrder === 'function') {
 }
 
 import crypto from 'crypto';
-if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.getRandomValues) {
-    globalThis.crypto = crypto.webcrypto || crypto;
-}
-if (typeof global.crypto === 'undefined' || !global.crypto.getRandomValues) {
-    global.crypto = crypto.webcrypto || crypto;
+try {
+    if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.getRandomValues) {
+        globalThis.crypto = crypto.webcrypto || crypto;
+    }
+} catch {
+    // Read-only getter on modern Node.js runtimes
 }
 
 // ✅ Prevent unhandled 3rd-party SDK exceptions or WebSocket connection rejections from crashing the server

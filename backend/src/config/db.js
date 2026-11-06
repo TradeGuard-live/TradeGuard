@@ -1,9 +1,10 @@
 import crypto from "crypto";
-if (typeof globalThis.crypto === "undefined" || !globalThis.crypto.randomBytes) {
-    globalThis.crypto = crypto;
-}
-if (typeof global.crypto === "undefined" || !global.crypto.randomBytes) {
-    global.crypto = crypto;
+try {
+    if (typeof globalThis.crypto === "undefined" || !globalThis.crypto.getRandomValues) {
+        globalThis.crypto = crypto.webcrypto || crypto;
+    }
+} catch {
+    // Read-only getter on modern Node.js runtimes
 }
 
 import mongoose from "mongoose";
