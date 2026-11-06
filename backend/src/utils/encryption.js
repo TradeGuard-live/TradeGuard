@@ -91,9 +91,12 @@ export const decrypt = (encryptedText) => {
     for (const key of candidateKeys) {
         try {
             const bytes = CryptoJS.AES.decrypt(str, key);
-            const originalText = bytes.toString(CryptoJS.enc.Utf8);
-            if (originalText && originalText.length > 0) {
-                return originalText;
+            // ✅ Security: Validate PKCS#7 unpadding and printable characters to reject corrupted/wrong key decryptions
+            if (bytes && bytes.sigBytes > 0) {
+                const originalText = bytes.toString(CryptoJS.enc.Utf8);
+                if (originalText && originalText.length > 0 && /^[\x20-\x7E\s]+$/.test(originalText)) {
+                    return originalText;
+                }
             }
         } catch {
             // Continue to next candidate key

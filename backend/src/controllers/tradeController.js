@@ -44,7 +44,11 @@ export const listTrades = async (req, res) => {
     };
     if (broker && broker !== "all") filter.broker = broker;
     if (side && side !== "all") filter.transactionType = side.toUpperCase();
-    if (search) filter.symbol = { $regex: String(search).slice(0, 80), $options: "i" };
+    // ✅ Security: Escape search regex to prevent ReDoS injection
+    if (search) {
+      const safeSearch = String(search).slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.symbol = { $regex: safeSearch, $options: "i" };
+    }
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 500, 1), 2000);
     const records = await TradeRecord.find(filter)
       .sort({ tradeTime: -1, createdAt: -1 })

@@ -4,6 +4,7 @@ if (dns && typeof dns.setDefaultResultOrder === "function") {
 }
 
 import express from "express";
+import mongoose from "mongoose";
 import cors from "cors";
 import userRoutes from "./routes/userRoutes.js";
 import brokerAccountRoutes from "./routes/brokerAccountRoutes.js";
@@ -63,6 +64,18 @@ app.get("/", (req, res) => {
     res.json({
         status: "ok",
         message: "TradeGuard API is running"
+    });
+});
+
+// ✅ Health check endpoint for container orchestrators and load balancers
+app.get(["/health", "/api/health"], (req, res) => {
+    const isHealthy = mongoose.connection.readyState === 1;
+    const dbStatus = isHealthy ? "connected" : (mongoose.connection.readyState === 2 ? "connecting" : "disconnected");
+    res.status(isHealthy ? 200 : 503).json({
+        status: isHealthy ? "ok" : "degraded",
+        uptime: Math.round(process.uptime()),
+        database: dbStatus,
+        timestamp: new Date().toISOString()
     });
 });
 

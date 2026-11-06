@@ -1,9 +1,10 @@
 import mongoose from "mongoose";
+import crypto from "crypto";
 import { parse } from "csv-parse/sync";
 import * as XLSX from "xlsx";
 import BrokerAccount from "../models/BrokerAccount.js";
 import TradeRecord from "../models/TradeRecord.js";
-import { mapAngelOneTrade } from "../brokers/angelOne/AngelOneMapper.js";
+import { mapAngelOneTrade, parseAngelOneDate } from "../brokers/angelOne/AngelOneMapper.js";
 
 /**
  * Angel One Postback Handler
@@ -17,6 +18,35 @@ import { mapAngelOneTrade } from "../brokers/angelOne/AngelOneMapper.js";
  */
 export const angelOnePostback = async (req, res) => {
     try {
+        // ✅ Security: Webhook secret must be configured in environment
+        const configuredSecret = process.env.ANGEL_WEBHOOK_SECRET;
+        if (!configuredSecret || typeof configuredSecret !== "string" || configuredSecret.trim() === "") {
+            console.error("[AngelOne Postback] Webhook secret is not configured on server.");
+            return res.status(503).json({
+                success: false,
+                message: "Webhook endpoint unavailable: secret configuration missing"
+            });
+        }
+
+        // ✅ Security: Require authentication token strictly via x-webhook-token header (query params rejected)
+        const incomingToken = req.headers?.["x-webhook-token"];
+        if (!incomingToken || typeof incomingToken !== "string") {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Missing webhook authentication token"
+            });
+        }
+
+        // ✅ Security: Constant-time secret comparison via SHA-256 digests to prevent timing leaks
+        const hashIncoming = crypto.createHash("sha256").update(incomingToken).digest();
+        const hashConfigured = crypto.createHash("sha256").update(configuredSecret).digest();
+        if (!crypto.timingSafeEqual(hashIncoming, hashConfigured)) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Invalid webhook authentication token"
+            });
+        }
+
         const payload = req.body;
 
         if (!payload) {
@@ -60,31 +90,64 @@ export const angelOnePostback = async (req, res) => {
                 ).trim().toUpperCase();
 
                 if (!clientCode) {
-                    console.warn("[AngelOne Postback] Order missing clientcode, trying all Angel One accounts");
+                    console.warn("[AngelOne Postback] Order missing clientcode, rejecting postback item");
+                    skipped++;
+                    continue;
                 }
 
                 // Find matching broker account
-                let brokerAccount = null;
-                if (clientCode) {
-                    brokerAccount = await BrokerAccount.findOne({
-                        broker: "ANGEL_ONE",
-                        "credentials.clientId": clientCode,
-                        isActive: true
-                    });
-                }
+                const brokerAccount = await BrokerAccount.findOne({
+                    broker: "ANGEL_ONE",
+                    "credentials.clientId": clientCode,
+                    isActive: true
+                });
 
+                // ✅ Security: Do not fall back to arbitrary broker accounts on missing/unrecognized clientCode
                 if (!brokerAccount) {
-                    // Try to find any active Angel One account
-                    brokerAccount = await BrokerAccount.findOne({
-                        broker: "ANGEL_ONE",
-                        isActive: true
-                    });
-                }
-
-                if (!brokerAccount) {
-                    console.warn("[AngelOne Postback] No matching broker account found for clientCode:", clientCode);
+                    console.warn("[AngelOne Postback] Unrecognized or missing clientCode. Postback rejected:", clientCode);
                     skipped++;
                     continue;
+                }
+
+                // ✅ Security: Strict payload validation on symbol, quantity, price, and transactionType
+                const rawSymbol = String(order.tradingsymbol || order.symbol || "").trim().toUpperCase();
+                if (!rawSymbol || !/^[A-Z0-9_\-\.\s]+$/.test(rawSymbol) || rawSymbol === "UNKNOWN") {
+                    console.warn("[AngelOne Postback] Trade has invalid or missing symbol, skipping:", rawSymbol);
+                    skipped++;
+                    continue;
+                }
+
+                if (!Number.isFinite(filledQty) || filledQty <= 0 || filledQty > 100000000) {
+                    console.warn("[AngelOne Postback] Trade has invalid quantity, skipping:", filledQty);
+                    skipped++;
+                    continue;
+                }
+
+                const rawPrice = Number(order.fillprice ?? order.averageprice ?? order.price ?? order.tradedprice ?? 0);
+                if (!Number.isFinite(rawPrice) || rawPrice <= 0) {
+                    console.warn("[AngelOne Postback] Trade has non-positive price, skipping:", rawPrice);
+                    skipped++;
+                    continue;
+                }
+
+                const rawTx = String(order.transactiontype || order.side || order.type || "").toUpperCase().trim();
+                if (rawTx !== "BUY" && rawTx !== "SELL") {
+                    console.warn("[AngelOne Postback] Trade has invalid transactionType, skipping:", rawTx);
+                    skipped++;
+                    continue;
+                }
+
+                // ✅ Security: Replay attack protection via timestamp freshness validation
+                const executionTime = parseAngelOneDate(order);
+                if (executionTime) {
+                    const timeMs = executionTime.getTime();
+                    const now = Date.now();
+                    // Reject timestamps older than 24 hours or more than 10 minutes in the future
+                    if (isNaN(timeMs) || (now - timeMs > 24 * 60 * 60 * 1000) || (timeMs - now > 10 * 60 * 1000)) {
+                        console.warn("[AngelOne Postback] Stale or future timestamp detected (possible replay), skipping:", executionTime);
+                        skipped++;
+                        continue;
+                    }
                 }
 
                 // Map the trade using existing mapper
@@ -99,7 +162,7 @@ export const angelOnePostback = async (req, res) => {
                     continue;
                 }
 
-                // Upsert into TradeRecord
+                // Upsert into TradeRecord with idempotency
                 const result = await TradeRecord.updateOne(
                     {
                         brokerAccountId: brokerAccount._id,
@@ -133,10 +196,10 @@ export const angelOnePostback = async (req, res) => {
             data: { inserted, updated, skipped }
         });
     } catch (error) {
-        console.error("[AngelOne Postback] Error:", error);
+        console.error("[AngelOne Postback] Internal processing error:", error.message);
         return res.status(500).json({
             success: false,
-            message: error.message || "Postback processing failed"
+            message: "Postback processing failed"
         });
     }
 };

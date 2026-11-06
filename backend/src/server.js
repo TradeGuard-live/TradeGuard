@@ -36,6 +36,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 import express from 'express';
+import mongoose from 'mongoose';
 import { connectDB } from './config/db.js';
 import cors from 'cors';
 import http from 'http';
@@ -100,6 +101,18 @@ app.get("/", (req, res) => {
     });
 });
 
+// ✅ Health check endpoint for container orchestrators and load balancers
+app.get(["/health", "/api/health"], (req, res) => {
+    const isHealthy = mongoose.connection.readyState === 1;
+    const dbStatus = isHealthy ? "connected" : (mongoose.connection.readyState === 2 ? "connecting" : "disconnected");
+    res.status(isHealthy ? 200 : 503).json({
+        status: isHealthy ? "ok" : "degraded",
+        uptime: Math.round(process.uptime()),
+        database: dbStatus,
+        timestamp: new Date().toISOString()
+    });
+});
+
 app.use("/api/users", userRoutes);
 app.use("/api/broker-accounts", brokerAccountRoutes);
 app.use("/api/trades", tradeRoutes);
@@ -126,10 +139,19 @@ app.use((err, req, res, next) => {
 const server = http.createServer(app);
 
 // --------------------
-// Initialize WebSocket
+// Startup Configuration Validation
 // --------------------
 
-liveWebSocketService.initialize(server);
+// ✅ Validate critical environment variables for production startup
+export const validateStartupConfig = (env = process.env) => {
+    if (env.NODE_ENV === "production") {
+        const requiredVars = ["JWT_SECRET", "ENCRYPTION_KEY", "ANGEL_WEBHOOK_SECRET"];
+        const missing = requiredVars.filter(v => !env[v] || String(env[v]).trim() === "");
+        if (missing.length > 0) {
+            throw new Error(`[Startup Error] Missing critical environment variables in production: ${missing.join(", ")}`);
+        }
+    }
+};
 
 // --------------------
 // Start Server
@@ -137,7 +159,13 @@ liveWebSocketService.initialize(server);
 
 const startServer = async () => {
     try {
+        validateStartupConfig();
         await connectDB();
+
+        // --------------------
+        // Initialize WebSocket
+        // --------------------
+        liveWebSocketService.initialize(server);
 
         server.listen(PORT, () => {
             console.log(
@@ -158,4 +186,33 @@ const startServer = async () => {
     }
 };
 
-startServer();
+// ✅ Graceful shutdown handler for production process managers (PM2, Docker, Kubernetes)
+const gracefulShutdown = (signal) => {
+    console.log(`[Server] Received ${signal}. Starting graceful shutdown...`);
+    server.close(async () => {
+        console.log("[Server] HTTP server closed.");
+        try {
+            if (mongoose.connection.readyState !== 0) {
+                await mongoose.connection.close(false);
+                console.log("[Server] MongoDB connection closed cleanly.");
+            }
+            process.exit(0);
+        } catch (err) {
+            console.error("[Server] Error during database disconnect:", err.message);
+            process.exit(1);
+        }
+    });
+
+    setTimeout(() => {
+        console.error("[Server] Graceful shutdown timed out. Forcing process exit.");
+        process.exit(1);
+    }, 10000).unref();
+};
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+if (isMain && process.env.NODE_ENV !== "test") {
+    startServer();
+}

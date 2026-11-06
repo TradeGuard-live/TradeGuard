@@ -10,7 +10,8 @@ import mongoose from "mongoose";
 
 export const connectDB = async () => {
     try {
-        console.log("Connecting to MongoDB:", process.env.MONGO_URI);
+        // ✅ Security: Redacted MONGO_URI from logs to prevent database credential exposure
+        console.log("Connecting to MongoDB database...");
         await mongoose.connect(process.env.MONGO_URI, {
             dbName: "tradeguard"
         });

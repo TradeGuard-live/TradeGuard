@@ -339,3 +339,34 @@ test("9. Missing, unverified, or boundary case handling", () => {
     });
     assert.equal(zeroTurnover.brokerage, 0);
 });
+
+test("10. Commodity (MCX) and Currency (CDS) statutory tariff verification", () => {
+    // 1. Commodity Derivatives (MCX)
+    const mcx = brokerConfig.exchangeCharges.MCX;
+    assert.equal(mcx.commodityFutures.rate, 0.0021, "MCX Commodity Futures exchange charge must be 0.0021%");
+    assert.equal(mcx.commodityOptions.rate, 0.0418, "MCX Commodity Options exchange charge must be 0.0418% of premium");
+
+    const ctt = brokerConfig.statutoryCharges.STT; // CTT shared under transaction taxes
+    assert.equal(ctt.commodityFutures.sell, 0.01, "Commodity Futures CTT must be 0.01% on sell turnover");
+    assert.equal(ctt.commodityFutures.buy, 0, "Commodity Futures CTT buy must be 0%");
+    assert.equal(ctt.commodityOptions.sell, 0.05, "Commodity Options CTT must be 0.05% on sell premium");
+    assert.equal(ctt.commodityOptions.buy, 0, "Commodity Options CTT buy must be 0%");
+
+    const commStamp = brokerConfig.statutoryCharges.stampDuty;
+    assert.equal(commStamp.commodityFutures.buy, 0.002, "Commodity Futures stamp duty must be 0.002% on buy turnover");
+    assert.equal(commStamp.commodityOptions.buy, 0.003, "Commodity Options stamp duty must be 0.003% on buy premium");
+
+    // 2. Currency Derivatives (NSE CDS)
+    const cds = brokerConfig.exchangeCharges.NSE;
+    assert.equal(cds.currencyFutures.rate, 0.0009, "Currency Futures exchange charge must be 0.0009%");
+    assert.equal(cds.currencyOptions.rate, 0.035, "Currency Options exchange charge must be 0.035% of premium");
+
+    assert.equal(ctt.currencyFutures.buy, 0, "Currency Futures STT must be 0%");
+    assert.equal(ctt.currencyFutures.sell, 0, "Currency Futures STT must be 0%");
+    assert.equal(ctt.currencyOptions.buy, 0, "Currency Options STT must be 0%");
+    assert.equal(ctt.currencyOptions.sell, 0, "Currency Options STT must be 0%");
+
+    const currStamp = brokerConfig.statutoryCharges.stampDuty;
+    assert.equal(currStamp.currencyFutures.buy, 0.0001, "Currency Futures stamp duty must be 0.0001% on buy turnover");
+    assert.equal(currStamp.currencyOptions.buy, 0.0001, "Currency Options stamp duty must be 0.0001% on buy premium");
+});

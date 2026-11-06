@@ -4,17 +4,19 @@ import TradeRecord from "../models/TradeRecord.js";
 import { calculateCharges, calculatePnL } from "../services/calculations.js";
 import brokerConfig from "../services/brokers/brokerConfig.js";
 
-// ✅ Helper to extract verified userId from JWT
+// ✅ Security: Derive verified userId strictly from JWT; reject IDOR mismatch attempts
 const getVerifiedUserId = (req, res) => {
-  if (req.user?.userId) {
-    return String(req.user.userId);
+  const tokenUserId = req.user?.userId ? String(req.user.userId) : null;
+  if (!tokenUserId) {
+    res.status(401).json({ success: false, message: "Unauthorized: Valid user identity required" });
+    return null;
   }
   const paramUserId = req.query.userId || req.params.userId || req.body?.userId;
-  if (paramUserId && mongoose.Types.ObjectId.isValid(paramUserId)) {
-    return String(paramUserId);
+  if (paramUserId && String(paramUserId) !== tokenUserId) {
+    res.status(403).json({ success: false, message: "Forbidden: Access denied to other users' records" });
+    return null;
   }
-  res.status(401).json({ success: false, message: "Unauthorized: Valid user identity required" });
-  return null;
+  return tokenUserId;
 };
 
 // Helper: Calculate Planned Risk/Reward Ratio
@@ -112,9 +114,10 @@ export const listJournalEntries = async (req, res) => {
       filter.tradeRecordId = new mongoose.Types.ObjectId(tradeRecordId);
     }
 
-    // Symbol / search
+    // ✅ Security: Escape regex special characters to prevent ReDoS attacks
     if (symbol) {
-      filter.symbol = { $regex: String(symbol).trim().slice(0, 50), $options: "i" };
+      const safeSymbol = String(symbol).trim().slice(0, 50).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.symbol = { $regex: safeSymbol, $options: "i" };
     }
 
     // Segment filter
@@ -132,11 +135,12 @@ export const listJournalEntries = async (req, res) => {
       filter.mistakes = mistake;
     }
 
-    // Emotion filter (matches preTradeEmotions or postTradeEmotionalState)
+    // ✅ Security: Escape emotion filter to prevent ReDoS or RegExp syntax errors
     if (emotion && emotion !== "ALL") {
+      const safeEmotion = String(emotion).trim().slice(0, 50).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       filter.$or = [
         { "psychology.preTradeEmotions": emotion },
-        { "psychology.postTradeEmotionalState": { $regex: new RegExp(`^${emotion}$`, "i") } }
+        { "psychology.postTradeEmotionalState": { $regex: new RegExp(`^${safeEmotion}$`, "i") } }
       ];
     }
 

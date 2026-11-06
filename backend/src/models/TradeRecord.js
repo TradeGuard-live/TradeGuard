@@ -135,6 +135,10 @@ tradeRecordSchema.index(
     }
 );
 
+// ✅ Performance: Compound indexes for high-volume trade queries, analytics, and sorting
+tradeRecordSchema.index({ userId: 1, tradeTime: -1, status: 1 });
+tradeRecordSchema.index({ userId: 1, broker: 1, tradeTime: -1 });
+
 
 const TradeRecord =
     mongoose.model(

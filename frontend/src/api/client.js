@@ -31,6 +31,13 @@ async function request(path, options = {}) {
   }
 
   if (!res.ok) {
+    if (res.status === 401 && !path.includes('/login') && !path.includes('/register')) {
+      // ✅ Auto-purge expired session credentials to prevent persistent unauthorized loops
+      localStorage.removeItem('tg_token');
+      localStorage.removeItem('tg_user');
+      localStorage.removeItem('tg_broker_accounts');
+    }
+
     const message =
       data?.message ||
       data?.error ||

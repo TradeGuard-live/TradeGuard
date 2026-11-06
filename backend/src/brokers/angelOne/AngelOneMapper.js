@@ -50,8 +50,8 @@ export const mapAngelOneOrderType = (orderType = "") => {
 };
 
 export const parseAngelOneDate = (trade) => {
-    const rawTime = trade.filltime || trade.tradetime || trade.updatetime || trade.orderstatusupdatetime;
-    if (!rawTime) return new Date();
+    const rawTime = trade.filltime || trade.tradetime || trade.updatetime || trade.orderstatusupdatetime || trade.tradeTime;
+    if (!rawTime) return null;
 
     const str = String(rawTime).trim();
     // Format could be "YYYY-MM-DD HH:mm:ss" or "DD-MMM-YYYY HH:mm:ss"
@@ -60,7 +60,22 @@ export const parseAngelOneDate = (trade) => {
         return parsed;
     }
 
-    return new Date();
+    // Try parsing DD-MM-YYYY or DD-MMM-YYYY
+    const dmy = str.match(/^(\d{1,2})[\/\-\.]([A-Za-z]{3,4}|\d{1,2})[\/\-\.](\d{4})(?:[,\s]+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/i);
+    if (dmy) {
+        let month = 0;
+        if (isNaN(dmy[2])) {
+            const mStr = dmy[2].toLowerCase().slice(0, 3);
+            const mMap = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+            month = mMap[mStr] ?? 0;
+        } else {
+            month = parseInt(dmy[2], 10) - 1;
+        }
+        const d = new Date(parseInt(dmy[3], 10), month, parseInt(dmy[1], 10), parseInt(dmy[4] || 0, 10), parseInt(dmy[5] || 0, 10), parseInt(dmy[6] || 0, 10));
+        if (!isNaN(d.getTime())) return d;
+    }
+
+    return null;
 };
 
 export const mapAngelOneTrade = (trade) => {
