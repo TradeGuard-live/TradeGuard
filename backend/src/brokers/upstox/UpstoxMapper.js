@@ -70,6 +70,8 @@ const mapUpstoxOrderType = (orderType) => {
 // ======================================================
 
 const mapUpstoxInstrumentSegment = (trade) => {
+    if (!trade) return "EQUITY";
+
     const instrumentType = String(
         trade.instrument_type ||
         trade.instrumentType ||
@@ -102,27 +104,53 @@ const mapUpstoxInstrumentSegment = (trade) => {
         return "FUTURES";
     }
 
-    const mappedSegment = mapUpstoxSegment(trade.segment);
-
     const symbol = String(
         trade.trading_symbol ||
+        trade.tradingsymbol ||
         trade.symbol ||
         trade.scrip_name ||
         ""
-    ).toUpperCase();
+    ).toUpperCase().trim();
 
-    // A generic F&O segment may represent an option.
-    // Check common option suffixes in the symbol.
-    if (
-        mappedSegment === "FUTURES" &&
-        /\b(CE|PE)\b/.test(symbol)
-    ) {
+    // Check symbol suffix for CE / PE (Options) or FUT (Futures)
+    if (/(CE|PE)$/i.test(symbol)) {
         return "OPTIONS";
     }
+    if (/FUT$/i.test(symbol)) {
+        return "FUTURES";
+    }
 
-    return mappedSegment;
+    const exchange = String(trade.exchange || "").toUpperCase();
+    const token = String(trade.instrument_token || trade.instrumentToken || trade.instrument_key || "");
+    if (exchange === "NFO" || exchange === "BFO" || token.includes("_FO|")) {
+        return /(CE|PE)$/i.test(symbol) ? "OPTIONS" : "FUTURES";
+    }
+
+    const mappedSegment = mapUpstoxSegment(trade.segment);
+    if (mappedSegment) {
+        if (mappedSegment === "FUTURES" && /(CE|PE)$/i.test(symbol)) {
+            return "OPTIONS";
+        }
+        return mappedSegment;
+    }
+
+    return "EQUITY";
 };
 
+
+const parseUpstoxTimestamp = (trade) => {
+    // Prefer order_timestamp since Upstox getTradesForDay gives actual execution time in IST (e.g. "2026-11-06 10:01:27")
+    const raw = trade.order_timestamp || trade.trade_date || trade.exchange_timestamp || trade.timestamp;
+    if (!raw) return new Date();
+
+    const str = String(raw).trim();
+    // If format is "YYYY-MM-DD HH:mm:ss" without explicit offset, parse with IST (+05:30)
+    if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$/.test(str)) {
+        return new Date(str.replace(" ", "T") + "+05:30");
+    }
+    const d = new Date(str);
+    return Number.isNaN(d.getTime()) ? new Date() : d;
+};
 
 // ======================================================
 // MAP TRADE
@@ -209,13 +237,7 @@ const mapUpstoxTrade = (trade) => {
 
         productCode: mapUpstoxProduct(trade.product),
 
-        tradeTime: trade.trade_date
-            ? new Date(trade.trade_date)
-            : trade.exchange_timestamp
-            ? new Date(trade.exchange_timestamp)
-            : trade.timestamp
-            ? new Date(trade.timestamp)
-            : null,
+        tradeTime: parseUpstoxTimestamp(trade),
 
         // Preserve the original broker payload for debugging
         // and future field mapping.
@@ -233,7 +255,19 @@ const mapUpstoxPosition = (pos) => {
     const exchange = String(pos.exchange || "NSE").toUpperCase();
     const segment = mapUpstoxInstrumentSegment(pos) || (pos.segment ? mapUpstoxSegment(pos.segment) : "EQUITY");
     const productType = mapUpstoxProduct(pos.product) || "INTRADAY";
-    const instrumentToken = pos.instrument_token || `${exchange}_EQ|${symbol}`;
+
+    // ✅ Resolve canonical instrument key safely without unsafe arbitrary string fallback
+    const rawToken = pos.instrument_token || pos.instrumentToken || pos.instrument_key || pos.instrumentKey;
+    const instrumentToken = rawToken && String(rawToken).includes("|")
+        ? String(rawToken).replace(":", "|").trim()
+        : (upstoxInstrumentService.resolveInstrumentKey({
+            symbol,
+            exchange,
+            segment,
+            instrumentToken: rawToken,
+            brokerResponse: pos
+        }) || rawToken || null);
+
     const qty = Number(pos.quantity || 0);
 
     const avgPrice = Number(pos.average_price ?? pos.buy_price ?? pos.day_buy_price ?? 0);
@@ -359,4 +393,5 @@ export {
     mapUpstoxProduct,
     mapUpstoxOrderType,
     mapUpstoxInstrumentSegment,
+    parseUpstoxTimestamp,
 };

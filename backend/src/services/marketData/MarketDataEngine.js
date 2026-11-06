@@ -20,9 +20,9 @@ import dhanMarketData from "../../brokers/dhan/DhanMarketDataService.js";
 import angelOneMarketData from "../../brokers/angelOne/AngelOneMarketDataService.js";
 import quoteCache from "./quoteCache.js";
 import upstoxInstrumentService from "./upstoxInstrumentService.js";
-import { getMarketSession, isIndianMarketOpen } from "./marketSessionService.js";
+import { getMarketSession, isIndianMarketOpen, isAnyMarketOpen } from "./marketSessionService.js";
 
-export { isIndianMarketOpen, getMarketSession };
+export { isIndianMarketOpen, getMarketSession, isAnyMarketOpen };
 
 export class MarketDataEngine {
     constructor() {
@@ -89,6 +89,8 @@ export class MarketDataEngine {
                 // Pre-populate quote cache with existing position broker prices if available
                 const existingLtp = Number(p.lastBrokerPrice || p.lastPrice || 0);
                 if (quoteCache.isValidPrice(existingLtp)) {
+                    // ✅ Do NOT fabricate Date.now(); use provider/trade timestamp or null
+                    const providerTime = p.lastTradeDate ? new Date(p.lastTradeDate).getTime() : null;
                     const quoteRecord = {
                         instrumentKey: key,
                         symbol: p.symbol,
@@ -96,7 +98,7 @@ export class MarketDataEngine {
                         segment: p.segment || "EQUITY",
                         lastPrice: existingLtp,
                         source: p.broker ? `${p.broker}_POSITION` : "BROKER_POSITION",
-                        lastPriceAt: Date.now()
+                        lastPriceAt: providerTime
                     };
                     quoteCache.updateQuote(quoteRecord);
                     if (p.symbol) {
@@ -148,8 +150,8 @@ export class MarketDataEngine {
                 }
 
                 // Check session: only connect live WebSocket and rapid polling during active market hours
-                const session = getMarketSession("NSE", "EQUITY");
-                if (session.isOpen) {
+                const isMarketActive = isAnyMarketOpen(instrumentKeys);
+                if (isMarketActive) {
                     // Connect live WebSocket feed for streaming updates
                     try {
                         const startRes = await upstoxMarketDataService.start(
@@ -177,10 +179,10 @@ export class MarketDataEngine {
                                 return;
                             }
 
-                            // Auto-stop polling if market has closed
-                            const currentSession = getMarketSession("NSE", "EQUITY");
-                            if (!currentSession.isOpen) {
-                                console.log(`[MarketDataEngine] Market closed (${currentSession.session}). Stopping rapid polling and live stream for user ${uId}.`);
+                            // Auto-stop polling if all subscribed instrument markets have closed
+                            const currentSubs = Array.from(this.subscribers.get(uId) || []);
+                            if (!isAnyMarketOpen(currentSubs)) {
+                                console.log(`[MarketDataEngine] Markets closed for all instruments. Stopping rapid polling and live stream for user ${uId}.`);
                                 clearInterval(pollTimer);
                                 this.pollers.delete(uId);
                                 await this.stop(uId);
@@ -188,7 +190,6 @@ export class MarketDataEngine {
                             }
 
                             try {
-                                const currentSubs = Array.from(this.subscribers.get(uId) || []);
                                 if (currentSubs.length > 0) {
                                     const quotes = await upstoxMarketDataService.fetchQuotesRest(upstoxToken, currentSubs);
                                     for (const [key, q] of quotes.entries()) {
@@ -207,7 +208,7 @@ export class MarketDataEngine {
                         this.pollers.set(uId, pollTimer);
                     }
                 } else {
-                    console.log(`[MarketDataEngine] Indian market is closed (${session.message || session.session}). Preserved official closing quotes via REST; WebSocket streaming and rapid polling paused.`);
+                    console.log(`[MarketDataEngine] Indian market is closed. Preserved official closing quotes via REST; WebSocket streaming and rapid polling paused.`);
                 }
             } catch (err) {
                 console.warn("[MarketDataEngine] Upstox market data notice:", err.message);

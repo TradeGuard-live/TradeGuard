@@ -98,13 +98,15 @@ export class PositionEngine {
             const segment = String(trade.segment || "EQUITY").toUpperCase();
             const productType = String(trade.productType || trade.productCode || trade.product || "INTRADAY").toUpperCase();
             // ✅ Resolve canonical instrument key using Upstox instrument service
-            const instrumentToken = trade.instrumentToken ||
-                                    trade.instrument_token ||
-                                    trade.instrument_key ||
-                                    trade.brokerResponse?.instrument_token ||
-                                    trade.brokerResponse?.instrument_key ||
-                                    upstoxInstrumentService.resolveInstrumentKey({ symbol, exchange, segment }) ||
-                                    `${exchange}_EQ|${symbol}`;
+            const explicitToken = trade.instrumentToken ||
+                                  trade.instrument_token ||
+                                  trade.instrument_key ||
+                                  trade.brokerResponse?.instrument_token ||
+                                  trade.brokerResponse?.instrument_key;
+
+            const instrumentToken = (explicitToken && String(explicitToken).includes("|"))
+                ? String(explicitToken).replace(":", "|").trim()
+                : (upstoxInstrumentService.resolveInstrumentKey({ symbol, exchange, segment }) || explicitToken || null);
 
             if (instrumentToken && instrumentToken.includes("|")) {
                 upstoxInstrumentService.registerInstrument(exchange, symbol, instrumentToken);
@@ -283,11 +285,26 @@ export class PositionEngine {
     /**
      * Filters for active open positions only (OPEN or PARTIALLY_SQUARED with openQuantity > 0).
      * @param {Array} trades 
+     * @param {Object} options
      * @returns {Array} openPositions
      */
-    getOpenPositions(trades = []) {
+    getOpenPositions(trades = [], options = {}) {
         const all = this.processTrades(trades);
-        return all.filter(p => p.openQuantity > EPSILON && p.status !== "FULLY_SQUARED");
+        let open = all.filter(p => p.openQuantity > EPSILON && p.status !== "FULLY_SQUARED");
+
+        if (options.excludeExpiredIntraday) {
+            const now = new Date();
+            const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+            open = open.filter(p => {
+                const isIntraday = p.productType === "INTRADAY" || p.productType === "MIS" || p.productType === "BO" || p.productType === "CO";
+                if (isIntraday && p.lastTradeDate && new Date(p.lastTradeDate) < startOfToday) {
+                    return false;
+                }
+                return true;
+            });
+        }
+
+        return open;
     }
 
     /**

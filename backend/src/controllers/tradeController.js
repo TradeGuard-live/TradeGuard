@@ -12,21 +12,17 @@ import OrderExecutionService from "../services/trading/OrderExecutionService.js"
 
 // ✅ Derive verified user identity from JWT to prevent IDOR vulnerabilities
 const getUserId = (req, res) => {
-  if (req.user?.userId) {
-    const tokenUserId = String(req.user.userId);
-    const paramUserId = req.query.userId || req.params.userId;
-    if (paramUserId && String(paramUserId) !== tokenUserId) {
-      res.status(403).json({ success: false, message: "Forbidden: Access denied to other users' records" });
-      return null;
-    }
-    return tokenUserId;
-  }
-  const userId = req.query.userId || req.params.userId;
-  if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
-    res.status(400).json({ success: false, message: "A valid MongoDB userId is required" });
+  const tokenUserId = req.user?.userId ? String(req.user.userId) : null;
+  if (!tokenUserId) {
+    res.status(401).json({ success: false, message: "Unauthorized: Valid authentication required" });
     return null;
   }
-  return userId;
+  const paramUserId = req.query.userId || req.params.userId || req.body?.userId;
+  if (paramUserId && String(paramUserId) !== tokenUserId) {
+    res.status(403).json({ success: false, message: "Forbidden: Access denied to other users' records" });
+    return null;
+  }
+  return tokenUserId;
 };
 
 export const listTrades = async (req, res) => {
@@ -180,13 +176,16 @@ export const getAnalytics = async (req, res) => {
       ? all.filter(t => t.broker === brokerFilter)
       : all;
 
+    const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    const upperLimit = range === "all" ? new Date(8640000000000000) : endOfToday;
+
     const trades = filteredAll.filter(t => {
       const d = effectiveTradeDate(t);
-      return d && d >= cutoff && d <= now;
+      return d && d >= cutoff && d <= upperLimit;
     }).sort((a,b) => effectiveTradeDate(a)-effectiveTradeDate(b));
 
     // Include pre-range executions so positions opened earlier can be matched to exits in range.
-    const closes = buildRealizedMatches(filteredAll).filter(c => c.date >= cutoff && c.date <= now);
+    const closes = buildRealizedMatches(filteredAll).filter(c => c.date >= cutoff && c.date <= upperLimit);
     const byDay = new Map();
     for (const c of closes) {
       const key = c.date.toISOString().slice(0,10);
@@ -491,13 +490,16 @@ export const getReportData = async (req, res) => {
     }
 
     const all = await TradeRecord.find(query).lean();
+    const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    const upperLimit = range === "all" ? new Date(8640000000000000) : endOfToday;
+
     const trades = all.filter(t => {
       const d = effectiveTradeDate(t);
-      return d && d >= cutoff && d <= now;
+      return d && d >= cutoff && d <= upperLimit;
     }).sort((a, b) => (effectiveTradeDate(b) || 0) - (effectiveTradeDate(a) || 0));
 
     const closes = buildRealizedMatches(all)
-      .filter(c => c.date >= cutoff && c.date <= now)
+      .filter(c => c.date >= cutoff && c.date <= upperLimit)
       .sort((a, b) => b.date - a.date);
 
     const wins = closes.filter(c => c.pnl > 0);
@@ -1061,7 +1063,7 @@ export const getLiveTradingSummary = async (req, res) => {
     }
 
     const allPositions = positionEngine.processTrades(trades);
-    let openPositions = positionEngine.getOpenPositions(trades);
+    let openPositions = positionEngine.getOpenPositions(trades, { excludeExpiredIntraday: true });
     const squaredPositions = positionEngine.getFullySquaredPositions(trades);
 
     if (brokerPositions.length > 0) {
@@ -1125,9 +1127,12 @@ export const getChargesAnalytics = async (req, res) => {
       ? allTrades.filter(t => t.broker === brokerFilter)
       : allTrades;
 
+    const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    const upperLimit = range === "all" ? new Date(8640000000000000) : endOfToday;
+
     const tradesInRange = filteredAll.filter(t => {
       const d = effectiveTradeDate(t);
-      return d && d >= cutoff && d <= now;
+      return d && d >= cutoff && d <= upperLimit;
     }).sort((a, b) => effectiveTradeDate(b) - effectiveTradeDate(a));
 
     let totalTurnover = 0;
@@ -1195,7 +1200,7 @@ export const getChargesAnalytics = async (req, res) => {
       };
     });
 
-    const closes = buildRealizedMatches(filteredAll).filter(c => c.date >= cutoff && c.date <= now);
+    const closes = buildRealizedMatches(filteredAll).filter(c => c.date >= cutoff && c.date <= upperLimit);
     const grossPnL = closes.reduce((sum, c) => sum + c.pnl, 0);
     const netPnL = grossPnL - totalCharges;
 
@@ -1285,7 +1290,6 @@ export const getChargesAnalytics = async (req, res) => {
 export const createTrade = async (req, res) => {
   try {
     const {
-      userId,
       brokerAccountId,
       broker,
       symbol,
@@ -1301,14 +1305,31 @@ export const createTrade = async (req, res) => {
       orderId
     } = req.body;
 
-    // ✅ Always enforce authenticated user ID to prevent IDOR trade injection
-    const effectiveUserId = req.user?.userId || userId;
+    // ✅ Always enforce authenticated user ID derived strictly from JWT
+    const effectiveUserId = getUserId(req, res);
+    if (!effectiveUserId) return;
 
-    if (!effectiveUserId || !brokerAccountId || !symbol || !transactionType || !quantity || !executedPrice) {
+    if (!brokerAccountId || !symbol || !transactionType || !quantity || !executedPrice) {
       return res.status(400).json({
         success: false,
-        message: "userId, brokerAccountId, symbol, transactionType, quantity, and executedPrice are required"
+        message: "brokerAccountId, symbol, transactionType, quantity, and executedPrice are required"
       });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(brokerAccountId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid brokerAccountId is required"
+      });
+    }
+
+    // ✅ Enforce broker account ownership so User A cannot inject trades into User B's broker account
+    const brokerAccount = await BrokerAccount.findById(brokerAccountId);
+    if (!brokerAccount) {
+      return res.status(404).json({ success: false, message: "Broker account not found" });
+    }
+    if (String(brokerAccount.userId) !== effectiveUserId) {
+      return res.status(403).json({ success: false, message: "Forbidden: Broker account belongs to another user" });
     }
 
     const tId = tradeId || `TRD-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
@@ -1316,7 +1337,7 @@ export const createTrade = async (req, res) => {
     const trade = await TradeRecord.create({
       userId: effectiveUserId,
       brokerAccountId,
-      broker: broker || "ANGEL_ONE",
+      broker: broker || brokerAccount.broker || "ANGEL_ONE",
       tradeId: tId,
       orderId: orderId || `ORD-${tId}`,
       symbol: String(symbol).toUpperCase(),
@@ -1346,18 +1367,19 @@ export const createTrade = async (req, res) => {
 
 export const deleteTrade = async (req, res) => {
   try {
+    const userId = getUserId(req, res);
+    if (!userId) return;
+
     const { id } = req.params;
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, message: "Valid trade ID required" });
     }
 
     // ✅ Enforce ownership check so User A cannot delete User B's trade
-    const deleteQuery = { _id: id };
-    if (req.user?.userId) {
-      deleteQuery.userId = new mongoose.Types.ObjectId(req.user.userId);
-    }
-
-    const deleted = await TradeRecord.findOneAndDelete(deleteQuery);
+    const deleted = await TradeRecord.findOneAndDelete({
+      _id: id,
+      userId: new mongoose.Types.ObjectId(userId)
+    });
     if (!deleted) {
       return res.status(404).json({ success: false, message: "Trade record not found or access denied" });
     }

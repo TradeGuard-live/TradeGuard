@@ -613,6 +613,60 @@ test("PnLEngine - position calculation supplies entryPrice and executionPrice at
     assert.strictEqual(pos.executionPrice, 522.50, "executionPrice must match execution average price");
 });
 
+test("PositionEngine - excludeExpiredIntraday option excludes stale intraday trades from previous dates", () => {
+    const pastTrades = [
+        {
+            _id: "past-trade-1",
+            tradeId: "TRD-PAST-01",
+            symbol: "HDFCLIFE",
+            exchange: "NSE",
+            segment: "EQUITY",
+            productType: "INTRADAY",
+            transactionType: "SELL",
+            quantity: 1,
+            executedPrice: 522.50,
+            status: "COMPLETE",
+            tradeTime: new Date(Date.now() - 4 * 86400000) // 4 days ago
+        }
+    ];
+
+    // Standard call preserves raw open positions
+    const standardOpen = positionEngine.getOpenPositions(pastTrades);
+    assert.strictEqual(standardOpen.length, 1);
+
+    // Call with excludeExpiredIntraday must filter it out because MIS positions do not carry across days
+    const liveOpen = positionEngine.getOpenPositions(pastTrades, { excludeExpiredIntraday: true });
+    assert.strictEqual(liveOpen.length, 0, "Past-date intraday position must be excluded from live open positions");
+});
+
+test("UpstoxMapper - correctly identifies option symbols and parses IST timestamps", async () => {
+    const { mapUpstoxTrade } = await import("../src/brokers/upstox/UpstoxMapper.js");
+
+    const optionTrade = {
+        trade_id: "UP-OPT-001",
+        order_id: "ORD-OPT-001",
+        trading_symbol: "NIFTY26N0924550CE",
+        exchange: "NFO",
+        instrument_token: "NSE_FO|40005",
+        transaction_type: "BUY",
+        quantity: 65,
+        price: 188.20,
+        product: "I",
+        order_type: "MARKET",
+        order_timestamp: "2026-11-06 09:47:56"
+    };
+
+    const mapped = mapUpstoxTrade(optionTrade);
+    assert.strictEqual(mapped.segment, "OPTIONS", "Option symbol NIFTY...CE must be mapped to OPTIONS segment");
+    assert.strictEqual(mapped.productCode, "INTRADAY");
+    assert.strictEqual(mapped.quantity, 65);
+    assert.strictEqual(mapped.executedPrice, 188.20);
+    assert.ok(mapped.tradeTime instanceof Date);
+    // Verified IST conversion: 09:47:56 IST is 04:17:56 UTC
+    assert.strictEqual(mapped.tradeTime.toISOString(), "2026-11-06T04:17:56.000Z");
+});
+
+
 
 
 

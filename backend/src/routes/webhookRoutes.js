@@ -1,4 +1,5 @@
 import express from "express";
+import { authenticate } from "../middleware/auth.js";
 import {
     angelOnePostback,
     angelOneImportCsv,
@@ -42,6 +43,7 @@ router.post("/angelone/postback", angelOnePostback);
 // POST /api/webhooks/angelone/import-csv/:brokerAccountId
 router.post(
     "/angelone/import-csv/:brokerAccountId",
+    authenticate,
     upload.single("file"),
     angelOneImportCsv
 );
@@ -52,6 +54,7 @@ router.post(
 // POST /api/webhooks/kotakneo/import-csv/:brokerAccountId
 router.post(
     "/kotakneo/import-csv/:brokerAccountId",
+    authenticate,
     upload.single("file"),
     kotakNeoImportCsv
 );

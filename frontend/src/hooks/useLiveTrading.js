@@ -141,14 +141,25 @@ export function useLiveTrading() {
             if (Array.isArray(data.positions)) {
               // Calculate price flash (up/down tick) only during open market with valid quotes
               const flashUpdates = {};
-              data.positions.forEach((p) => {
-                const sym = p.symbol || p.instrumentToken;
-                const prev = previousPricesRef.current.get(sym);
-                if (prev !== undefined && p.ltp !== prev && p.ltp > 0 && p.quoteFreshness !== 'MARKET CLOSED') {
-                  flashUpdates[sym] = p.ltp > prev ? 'up' : 'down';
-                }
-                previousPricesRef.current.set(sym, p.ltp);
-              });
+              const marketIsOpen = typeof data.isMarketOpen === 'boolean' ? data.isMarketOpen : isMarketOpen;
+
+              if (marketIsOpen) {
+                data.positions.forEach((p) => {
+                  const sym = p.symbol || p.instrumentToken;
+                  const prev = previousPricesRef.current.get(sym);
+                  const freshness = String(p.quoteFreshness || '').toUpperCase().replace(/_/g, ' ');
+                  const isClosedOrStale = freshness === 'MARKET CLOSED' || freshness === 'STALE' || freshness === 'UNAVAILABLE';
+                  if (prev !== undefined && p.ltp !== prev && p.ltp > 0 && !isClosedOrStale) {
+                    flashUpdates[sym] = p.ltp > prev ? 'up' : 'down';
+                  }
+                  previousPricesRef.current.set(sym, p.ltp);
+                });
+              } else {
+                data.positions.forEach((p) => {
+                  const sym = p.symbol || p.instrumentToken;
+                  previousPricesRef.current.set(sym, p.ltp);
+                });
+              }
 
               if (Object.keys(flashUpdates).length > 0) {
                 setPriceFlash((prev) => ({ ...prev, ...flashUpdates }));

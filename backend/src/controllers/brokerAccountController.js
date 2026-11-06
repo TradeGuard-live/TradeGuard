@@ -477,18 +477,41 @@ export const verifyBrokerCredentials = async (brokerAccount) => {
 
 const createBrokerAccount = async (req, res) => {
     try {
-        // ✅ Always prioritize authenticated user identity from verified JWT
-        const effectiveUserId = req.user?.userId || req.body.userId;
+        // ✅ Enforce authenticated user identity from verified JWT
+        const effectiveUserId = req.user?.userId ? String(req.user.userId) : null;
+        if (!effectiveUserId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Valid authentication required"
+            });
+        }
+
+        // Prevent cross-user account creation via payload injection
+        if (req.body.userId && String(req.body.userId) !== effectiveUserId) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: Cannot create broker accounts for other users"
+            });
+        }
+
         const {
             broker,
             credentials
         } = req.body;
 
         // Basic validation
-        if (!effectiveUserId || !broker || !credentials?.clientId) {
+        if (!broker || !credentials?.clientId) {
             return res.status(400).json({
                 success: false,
-                message: "userId, broker and clientId are required"
+                message: "broker and clientId are required"
+            });
+        }
+
+        // ✅ Kotak Neo active integration is deprecated and disabled for new connections
+        if (broker === "KOTAK_NEO") {
+            return res.status(400).json({
+                success: false,
+                message: "Kotak Neo active broker integration is deprecated and disabled. Existing historical records remain accessible for reports and analytics."
             });
         }
 
@@ -604,26 +627,23 @@ const createBrokerAccount = async (req, res) => {
 
 const getBrokerAccounts = async (req, res) => {
     try {
-
         // ✅ Enforce ownership from verified JWT token to prevent IDOR
-        const filter = {};
-        if (req.user?.userId) {
-            filter.userId = req.user.userId;
-            if (req.query.userId && String(req.query.userId) !== String(req.user.userId)) {
-                return res.status(403).json({
-                    success: false,
-                    message: "Forbidden: Access denied to other users' broker accounts"
-                });
-            }
-        } else if (req.query.userId) {
-            if (!mongoose.Types.ObjectId.isValid(req.query.userId)) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Invalid userId"
-                });
-            }
-            filter.userId = req.query.userId;
+        const userId = req.user?.userId ? String(req.user.userId) : null;
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Valid authentication required"
+            });
         }
+
+        if (req.query.userId && String(req.query.userId) !== userId) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: Access denied to other users' broker accounts"
+            });
+        }
+
+        const filter = { userId };
 
         const brokerAccounts = await BrokerAccount
             .find(filter)
@@ -708,7 +728,14 @@ const getBrokerAccount = async (req, res) => {
         }
 
         // ✅ Verify account ownership
-        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+        const userId = req.user?.userId ? String(req.user.userId) : null;
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Valid authentication required"
+            });
+        }
+        if (String(brokerAccount.userId) !== userId) {
             return res.status(403).json({
                 success: false,
                 message: "Forbidden: Access denied"
@@ -757,7 +784,14 @@ const updateBrokerAccount = async (req, res) => {
         }
 
         // ✅ Verify account ownership
-        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+        const userId = req.user?.userId ? String(req.user.userId) : null;
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Valid authentication required"
+            });
+        }
+        if (String(brokerAccount.userId) !== userId) {
             return res.status(403).json({
                 success: false,
                 message: "Forbidden: Access denied"
@@ -933,7 +967,14 @@ const deleteBrokerAccount = async (req, res) => {
         }
 
         // ✅ Verify account ownership before deletion
-        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+        const userId = req.user?.userId ? String(req.user.userId) : null;
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Valid authentication required"
+            });
+        }
+        if (String(brokerAccount.userId) !== userId) {
             return res.status(403).json({
                 success: false,
                 message: "Forbidden: Access denied"
@@ -1000,7 +1041,14 @@ const syncBrokerTrades = async (req, res) => {
         }
 
         // ✅ Verify account ownership
-        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+        const userId = req.user?.userId ? String(req.user.userId) : null;
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Valid authentication required"
+            });
+        }
+        if (String(brokerAccount.userId) !== userId) {
             return res.status(403).json({
                 success: false,
                 message: "Forbidden: Access denied"
@@ -1182,7 +1230,14 @@ const verifyBrokerAccount = async (req, res) => {
         }
 
         // ✅ Verify account ownership
-        if (req.user?.userId && String(brokerAccount.userId) !== String(req.user.userId)) {
+        const userId = req.user?.userId ? String(req.user.userId) : null;
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Valid authentication required"
+            });
+        }
+        if (String(brokerAccount.userId) !== userId) {
             return res.status(403).json({
                 success: false,
                 message: "Forbidden: Access denied"

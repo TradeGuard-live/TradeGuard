@@ -15,7 +15,7 @@ import TradeRecord from "../../models/TradeRecord.js";
 import BrokerAccount from "../../models/BrokerAccount.js";
 import positionEngine from "../position/PositionEngine.js";
 import pnlEngine from "../pnl/PnLEngine.js";
-import marketDataEngine, { isIndianMarketOpen } from "../marketData/MarketDataEngine.js";
+import marketDataEngine, { isIndianMarketOpen, isAnyMarketOpen } from "../marketData/MarketDataEngine.js";
 import brokerSyncManager from "../brokerSync/BrokerSyncManager.js";
 import { copyExecutionRouter } from "../copyTrading/engine/CopyExecutionRouter.js";
 import OrderExecutionService from "../trading/OrderExecutionService.js";
@@ -242,9 +242,9 @@ class LiveWebSocketService {
             }
             let trades = await TradeRecord.find(query).lean();
 
-            // 3. Run Position Engine
+            // 3. Run Position Engine with stale intraday exclusions
             const allMatchedPositions = positionEngine.processTrades(trades);
-            let openPositions = positionEngine.getOpenPositions(trades);
+            let openPositions = positionEngine.getOpenPositions(trades, { excludeExpiredIntraday: true });
 
             // Reconcile with broker positions if available
             if (brokerPositions && brokerPositions.length > 0) {
@@ -259,11 +259,12 @@ class LiveWebSocketService {
 
             // 6. Broadcast initial calculation snapshot
             const initialSnapshot = pnlEngine.calculate(uId);
+            const isLiveMarketOpen = isAnyMarketOpen(openPositions);
             this.broadcast(uId, {
                 type: "INITIAL_DATA",
                 data: {
                     ...initialSnapshot,
-                    isMarketOpen: isIndianMarketOpen(),
+                    isMarketOpen: isLiveMarketOpen,
                     allPositions: allMatchedPositions,
                     squaredPositions: positionEngine.getFullySquaredPositions(trades)
                 }
@@ -284,11 +285,12 @@ class LiveWebSocketService {
 
         const updatedData = pnlEngine.updatePrice(uId, instrumentKey, ltp, quoteObj);
         if (updatedData) {
+            const openPositions = pnlEngine.positions.get(uId) || [];
             this.broadcast(uId, {
                 type: "LIVE_PNL_UPDATE",
                 data: {
                     ...updatedData,
-                    isMarketOpen: isIndianMarketOpen()
+                    isMarketOpen: isAnyMarketOpen(openPositions)
                 }
             });
         }

@@ -32,7 +32,8 @@ function formatINR(val) {
 
 // ✅ Renders quote freshness badge with semantic color codes
 function renderQuoteFreshnessBadge(status) {
-  switch (status) {
+  const normalized = String(status || '').toUpperCase().replace(/_/g, ' ');
+  switch (normalized) {
     case 'LIVE':
       return <span className="quote-badge quote-badge-live">LIVE</span>;
     case 'MARKET CLOSED':

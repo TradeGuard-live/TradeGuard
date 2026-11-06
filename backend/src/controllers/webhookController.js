@@ -249,6 +249,18 @@ function parseOrderAndProduct(rawOrderType, rawSegment) {
     return { productCode, orderType };
 }
 
+/**
+ * Helper: Sanitize string cells to prevent CSV formula injection (DDE attacks)
+ * Strips dangerous formula execution prefixes (=, +, -, @, \t, \r)
+ */
+export function sanitizeCsvCell(val) {
+    if (typeof val !== "string") return val;
+    const trimmed = val.trim();
+    if (/^[=+\-@\t\r]/.test(trimmed)) {
+        return trimmed.replace(/^[=+\-@\t\r]+/, "");
+    }
+    return val;
+}
 
 /**
  * Angel One CSV / Excel Import
@@ -277,6 +289,22 @@ export const angelOneImportCsv = async (req, res) => {
             });
         }
 
+        // ✅ Enforce ownership check so User A cannot import trades into User B's account
+        const userId = req.user?.userId ? String(req.user.userId) : null;
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Valid authentication required"
+            });
+        }
+
+        if (String(brokerAccount.userId) !== userId) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: Broker account belongs to another user"
+            });
+        }
+
         if (brokerAccount.broker !== "ANGEL_ONE") {
             return res.status(400).json({
                 success: false,
@@ -294,12 +322,26 @@ export const angelOneImportCsv = async (req, res) => {
         const buffer = req.file.buffer;
         let rows = [];
 
-        // Check if file is Excel (starts with ZIP signature 'PK' 0x50 0x4B) or has .xlsx/.xls extension
-        const isExcel = (buffer[0] === 0x50 && buffer[1] === 0x4B) ||
-            req.file.originalname?.endsWith(".xlsx") ||
-            req.file.originalname?.endsWith(".xls") ||
+        // Validate magic bytes:
+        // Excel: PK (0x50 0x4B) for .xlsx, or OLE CFB (0xD0 0xCF 0x11 0xE0) for .xls
+        // CSV: Plain text (no null bytes in the first 512 bytes)
+        const isZipExcel = buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4B;
+        const isOleExcel = buffer.length >= 4 && buffer[0] === 0xD0 && buffer[1] === 0xCF && buffer[2] === 0x11 && buffer[3] === 0xE0;
+        const isExcel = isZipExcel || isOleExcel ||
+            req.file.originalname?.toLowerCase().endsWith(".xlsx") ||
+            req.file.originalname?.toLowerCase().endsWith(".xls") ||
             req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
             req.file.mimetype === "application/vnd.ms-excel";
+
+        if (!isExcel) {
+            const sample = buffer.slice(0, Math.min(buffer.length, 512));
+            if (sample.includes(0x00)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid file format: Binary or executable detected instead of CSV/Excel"
+                });
+            }
+        }
 
         if (isExcel) {
             try {
@@ -448,7 +490,8 @@ export const angelOneImportCsv = async (req, res) => {
                 continue;
             }
 
-            const symbol = String(r[symbolCol] || "").trim();
+            const rawSymbol = String(r[symbolCol] || "").trim();
+            const symbol = sanitizeCsvCell(rawSymbol);
             if (!symbol) {
                 continue;
             }
@@ -491,9 +534,9 @@ export const angelOneImportCsv = async (req, res) => {
                 continue;
             }
 
-            // Order & Trade IDs
-            const orderId = orderIdCol >= 0 ? String(r[orderIdCol] || "").trim() : "";
-            const rawTradeId = tradeIdCol >= 0 ? String(r[tradeIdCol] || "").trim() : "";
+            // Order & Trade IDs (sanitized to prevent formula injection)
+            const orderId = orderIdCol >= 0 ? sanitizeCsvCell(String(r[orderIdCol] || "").trim()) : "";
+            const rawTradeId = tradeIdCol >= 0 ? sanitizeCsvCell(String(r[tradeIdCol] || "").trim()) : "";
             const tradeDate = parseTradeDate(dateCol >= 0 ? r[dateCol] : null);
             const dateStr = tradeDate.toISOString().split("T")[0];
 
@@ -594,6 +637,22 @@ export const kotakNeoImportCsv = async (req, res) => {
             });
         }
 
+        // ✅ Enforce ownership check so User A cannot import trades into User B's account
+        const userId = req.user?.userId ? String(req.user.userId) : null;
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Valid authentication required"
+            });
+        }
+
+        if (String(brokerAccount.userId) !== userId) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: Broker account belongs to another user"
+            });
+        }
+
         if (brokerAccount.broker !== "KOTAK_NEO") {
             return res.status(400).json({
                 success: false,
@@ -611,11 +670,26 @@ export const kotakNeoImportCsv = async (req, res) => {
         const buffer = req.file.buffer;
         let rows = [];
 
-        const isExcel = (buffer[0] === 0x50 && buffer[1] === 0x4B) ||
-            req.file.originalname?.endsWith(".xlsx") ||
-            req.file.originalname?.endsWith(".xls") ||
+        // Validate magic bytes:
+        // Excel: PK (0x50 0x4B) for .xlsx, or OLE CFB (0xD0 0xCF 0x11 0xE0) for .xls
+        // CSV: Plain text (no null bytes in the first 512 bytes)
+        const isZipExcel = buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4B;
+        const isOleExcel = buffer.length >= 4 && buffer[0] === 0xD0 && buffer[1] === 0xCF && buffer[2] === 0x11 && buffer[3] === 0xE0;
+        const isExcel = isZipExcel || isOleExcel ||
+            req.file.originalname?.toLowerCase().endsWith(".xlsx") ||
+            req.file.originalname?.toLowerCase().endsWith(".xls") ||
             req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
             req.file.mimetype === "application/vnd.ms-excel";
+
+        if (!isExcel) {
+            const sample = buffer.slice(0, Math.min(buffer.length, 512));
+            if (sample.includes(0x00)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid file format: Binary or executable detected instead of CSV/Excel"
+                });
+            }
+        }
 
         if (isExcel) {
             try {
@@ -773,7 +847,7 @@ export const kotakNeoImportCsv = async (req, res) => {
                 continue;
             }
 
-            const rawSymbol = String(r[symbolCol]).trim().toUpperCase();
+            const rawSymbol = sanitizeCsvCell(String(r[symbolCol]).trim().toUpperCase());
             if (!rawSymbol || rawSymbol.startsWith("TOTAL") || rawSymbol.startsWith("DISCLAIMER") || rawSymbol.startsWith("NOTE")) {
                 skipped++;
                 continue;
@@ -810,8 +884,8 @@ export const kotakNeoImportCsv = async (req, res) => {
                 continue;
             }
 
-            const rawTradeId = tradeIdCol >= 0 && r[tradeIdCol] ? String(r[tradeIdCol]).trim() : "";
-            const rawOrderNo = orderIdCol >= 0 && r[orderIdCol] ? String(r[orderIdCol]).trim() : "";
+            const rawTradeId = tradeIdCol >= 0 && r[tradeIdCol] ? sanitizeCsvCell(String(r[tradeIdCol]).trim()) : "";
+            const rawOrderNo = orderIdCol >= 0 && r[orderIdCol] ? sanitizeCsvCell(String(r[orderIdCol]).trim()) : "";
             const rawDateVal = resolvedDateCol >= 0 ? r[resolvedDateCol] : null;
             const validDate = parseTradeDate(rawDateVal);
 

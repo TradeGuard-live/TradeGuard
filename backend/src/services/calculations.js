@@ -29,7 +29,7 @@ function toNumber(value, fieldName = "value") {
 	const number = Number(value);
 
 	if (!Number.isFinite(number)) {
-		throw new Error(`$ {fieldName} must be a valid number`);
+		throw new Error(`${fieldName} must be a valid number`);
 	}
 
 	return number;
@@ -39,7 +39,7 @@ function positiveNumber(value, fieldName) {
 	const number = toNumber(value, fieldName);
 
 	if (number <= 0) {
-		throw new Error(`$ {fieldName} must be greater than zero`);
+		throw new Error(`${fieldName} must be greater than zero`);
 	}
 
 	return number;
@@ -49,7 +49,7 @@ function nonNegativeNumber(value, fieldName) {
 	const number = toNumber(value, fieldName);
 
 	if (number < 0) {
-		throw new Error(`$ {fieldName} cannot be negative`);
+		throw new Error(`${fieldName} cannot be negative`);
 	}
 
 	return number;
@@ -67,7 +67,7 @@ function normalizeSide(side) {
 	const normalized = String(side || "").toUpperCase();
 
 	if (normalized !== "BUY" && normalized !== "SELL") {
-		throw new Error(`Invalid transactionType: $ {side}`);
+		throw new Error(`Invalid transactionType: ${side}`);
 	}
 
 	return normalized;
@@ -81,7 +81,7 @@ function getDate(value) {
 	const date = value instanceof Date ? value : new Date(value);
 
 	if (Number.isNaN(date.getTime())) {
-		throw new Error(`Invalid date: $ {value}`);
+		throw new Error(`Invalid date: ${value}`);
 	}
 
 	return date;

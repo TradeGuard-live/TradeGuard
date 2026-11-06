@@ -7,6 +7,7 @@
  * - Real-time decoded protobuf stream ingestion with timestamp validation
  * - REST snapshot client for live LTP, OHLC, and official closing prices
  * - Bounded auto-reconnect without retry storms
+ * - Multi-exchange & instrument session awareness (NSE, BSE, F&O, Currency, Commodity)
  */
 
 import UpstoxClient from "upstox-js-sdk";
@@ -15,7 +16,7 @@ import { createRequire } from "module";
 import BrokerAccount from "../../models/BrokerAccount.js";
 import quoteCache from "../../services/marketData/quoteCache.js";
 import upstoxInstrumentService from "../../services/marketData/upstoxInstrumentService.js";
-import { getMarketSession } from "../../services/marketData/marketSessionService.js";
+import { getMarketSession, isAnyMarketOpen } from "../../services/marketData/marketSessionService.js";
 
 // ✅ Fix Upstox SDK bug: Streamer.js calls this.streamer.clearSubscriptions() on autoReconnect stop,
 // but MarketDataFeederV3 lacks clearSubscriptions, resulting in an unhandled TypeError crash.
@@ -53,7 +54,7 @@ class UpstoxMarketDataService {
 
         try {
             // Upstox expects comma-separated instrument keys
-            // e.g. "NSE_EQ|INE002A01018,NSE_EQ|INE467B01029"
+            // e.g. "NSE_EQ|INE002A01018,NSE_EQ|INE467B01029,NSE_FO|40005"
             const symbolsParam = instrumentKeys
                 .map(k => upstoxInstrumentService.normalizeInstrumentKey(k))
                 .filter(Boolean)
@@ -105,23 +106,34 @@ class UpstoxMarketDataService {
 
             if (data && typeof data === "object") {
                 for (const [key, quote] of Object.entries(data)) {
-                    // Normalize key
                     const normalizedKey = upstoxInstrumentService.normalizeInstrumentKey(key);
                     const ltp = Number(quote.last_price);
 
                     if (quoteCache.isValidPrice(ltp)) {
+                        // Canonical key resolution: prefer official instrument_token if returned
+                        const canonicalKey = (quote.instrument_token && String(quote.instrument_token).includes("|"))
+                            ? upstoxInstrumentService.normalizeInstrumentKey(quote.instrument_token)
+                            : normalizedKey;
+
                         const previousClose = Number(quote.ohlc?.close ?? quote.close ?? quote.net_change ?? 0);
                         const open = Number(quote.ohlc?.open ?? 0);
                         const high = Number(quote.ohlc?.high ?? 0);
                         const low = Number(quote.ohlc?.low ?? 0);
-                        const timestamp = quote.timestamp ? new Date(quote.timestamp).getTime() : Date.now();
 
-                        const exchange = normalizedKey.startsWith("BSE") ? "BSE" : "NSE";
-                        const segment = normalizedKey.includes("_FO") ? "FUTURES" : "EQUITY";
-                        const symbol = quote.symbol || normalizedKey.split("|")[1] || key;
+                        // ✅ Preserve provider timestamp separately; NEVER fabricate Date.now()
+                        const timestamp = quote.timestamp 
+                            ? new Date(quote.timestamp).getTime() 
+                            : (quote.last_trade_time ? Number(quote.last_trade_time) : null);
+
+                        const exchange = canonicalKey.startsWith("BSE") ? "BSE" : (canonicalKey.startsWith("MCX") ? "MCX" : "NSE");
+                        const segment = canonicalKey.includes("_FO") ? "OPTIONS" : "EQUITY";
+                        const rawSymbol = quote.symbol || normalizedKey.split("|")[1] || key;
+                        const symbol = upstoxInstrumentService.normalizeSymbol(rawSymbol);
 
                         const updatedQuote = quoteCache.updateQuote({
-                            instrumentKey: normalizedKey,
+                            instrumentKey: canonicalKey,
+                            rawKey: key,
+                            instrumentToken: quote.instrument_token,
                             symbol,
                             exchange,
                             segment,
@@ -135,9 +147,13 @@ class UpstoxMarketDataService {
                         });
 
                         if (updatedQuote) {
+                            quoteMap.set(canonicalKey, updatedQuote);
                             quoteMap.set(normalizedKey, updatedQuote);
                             quoteMap.set(key, updatedQuote);
-                            if (symbol) quoteMap.set(symbol, updatedQuote);
+                            if (symbol) {
+                                quoteMap.set(symbol, updatedQuote);
+                                upstoxInstrumentService.registerInstrument(exchange, symbol, canonicalKey);
+                            }
                         }
                     }
                 }
@@ -179,14 +195,13 @@ class UpstoxMarketDataService {
             }
         }
 
-        // Ensure session allows streaming (no pointless connection when exchange is closed)
-        const session = getMarketSession("NSE", "EQUITY");
-        if (!session.isOpen) {
-            console.log(`[UpstoxMarketData] Market is closed (${session.message || session.session}). Skipping live WebSocket feed; closing quotes preserved via REST.`);
+        // ✅ Multi-instrument session check: only stream if at least one subscribed instrument market is open
+        const isLiveSessionActive = isAnyMarketOpen(instrumentKeys);
+        if (!isLiveSessionActive) {
+            console.log(`[UpstoxMarketData] Markets are closed for all subscribed instruments. Skipping live WebSocket feed; closing quotes preserved via REST.`);
             return {
                 connected: false,
-                marketClosed: true,
-                session
+                marketClosed: true
             };
         }
 
@@ -227,16 +242,20 @@ class UpstoxMarketDataService {
                             const close = feed?.ltpc?.cp ?? feed?.ff?.marketFF?.ltpc?.cp; // Close price
 
                             if (quoteCache.isValidPrice(ltp)) {
-                                const exchange = normalizedKey.startsWith("BSE") ? "BSE" : "NSE";
-                                const segment = normalizedKey.includes("_FO") ? "FUTURES" : "EQUITY";
+                                const exchange = normalizedKey.startsWith("BSE") ? "BSE" : (normalizedKey.startsWith("MCX") ? "MCX" : "NSE");
+                                const segment = normalizedKey.includes("_FO") ? "OPTIONS" : "EQUITY";
+
+                                // ✅ Do NOT fabricate Date.now() if ltt is absent
+                                const validLtt = ltt ? Number(ltt) : null;
 
                                 const updatedQuote = quoteCache.updateQuote({
                                     instrumentKey: normalizedKey,
+                                    rawKey: key,
                                     exchange,
                                     segment,
                                     lastPrice: Number(ltp),
                                     previousClose: close ? Number(close) : undefined,
-                                    lastPriceAt: ltt ? Number(ltt) : Date.now(),
+                                    lastPriceAt: validLtt,
                                     source: "UPSTOX_WS"
                                 });
 
@@ -283,8 +302,8 @@ class UpstoxMarketDataService {
                     return;
                 }
 
-                const currentSession = getMarketSession("NSE", "EQUITY");
-                if (!currentSession.isOpen) {
+                // Session check across subscribed instruments
+                if (!isAnyMarketOpen(normalizedKeys)) {
                     try {
                         if (typeof streamer.autoReconnect === "function") {
                             streamer.autoReconnect(false);
@@ -305,12 +324,10 @@ class UpstoxMarketDataService {
 
             streamer.on("close", () => {
                 if (!this.streamers.has(uId)) {
-                    // Already closed/cleaned up
                     return;
                 }
-                const currentSession = getMarketSession("NSE", "EQUITY");
-                if (!currentSession.isOpen) {
-                    console.log(`[UpstoxMarketData] Market closed (${currentSession.session}). Stopping auto-reconnect for ${uId}.`);
+                if (!isAnyMarketOpen(normalizedKeys)) {
+                    console.log(`[UpstoxMarketData] Markets closed. Stopping auto-reconnect for ${uId}.`);
                     try {
                         if (typeof streamer.autoReconnect === "function") {
                             streamer.autoReconnect(false);
